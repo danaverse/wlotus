@@ -1,0 +1,27 @@
+import { ALP_STANDARD, alpMint, emppScript, Script } from 'ecash-lib';
+import { wlptV4Pushdata, type MooreTipState } from './mooreTip.js';
+import {
+  WLOTUS_MINER_ATOMS,
+  WLOTUS_TEMPLE_ATOMS,
+} from '../params/wlotusMint.js';
+
+export {
+  WLOTUS_MINER_ATOMS,
+  WLOTUS_TEMPLE_ATOMS,
+  WLOTUS_MINT_ATOMS,
+  WLOTUS_DESK_KEEP_AFTER_BURN,
+} from '../params/wlotusMint.js';
+
+/** Dual-push EMPP: DANA tip v4 + ALP MINT [102, 6] + 1 baton. */
+export function expectedMooreTipTempleMintOpReturnScript(
+  tokenId: string,
+  state: MooreTipState,
+): Script {
+  return emppScript([
+    wlptV4Pushdata(state),
+    alpMint(tokenId, ALP_STANDARD, {
+      atomsArray: [WLOTUS_MINER_ATOMS, WLOTUS_TEMPLE_ATOMS],
+      numBatons: 1,
+    }),
+  ]);
+}
