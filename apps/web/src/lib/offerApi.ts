@@ -1,0 +1,312 @@
+import { MINT_API_BASE } from './config.js';
+
+export interface ChallengeOk {
+  ok: true;
+  challengeId: string;
+  expiresAt: string;
+  tokenId: string;
+  bits: number;
+  commit: 'sha256-preimage';
+  nonceLength: number;
+  preimageHex: string;
+  powPrefixHex: string;
+  locktime: number;
+  tipLocktime: number;
+  tipKey?: string;
+  tipEpoch?: string;
+  tipIndex?: number;
+  mintAtoms: string;
+  note: string;
+  /** Prior burn txid when this challenge is a re-offer. */
+  parentBurnTxid?: string;
+}
+
+export interface OfferOk {
+  ok: true;
+  remintTxid: string;
+  /** Empty when `burnPending` — call {@link completeOfferBurn} after soft pray. */
+  burnTxid: string;
+  burnPending: boolean;
+  /** Capability for burn/abandon; only from submit — keep in memory, never share. */
+  burnToken?: string;
+  tokenId: string;
+  bits: number;
+  powAttempts: number;
+  powMs: number;
+  hashrateHps: number;
+  deskAtomsKept: number;
+  explorerRemint: string;
+  explorerBurn: string;
+}
+
+export interface BurnOk {
+  ok: true;
+  remintTxid: string;
+  burnTxid: string;
+  tokenId: string;
+  deskAtomsKept: number;
+  explorerRemint: string;
+  explorerBurn: string;
+}
+
+export interface StatusOk {
+  tokenId: string | null;
+  mintAtoms: string | null;
+  ticker: string;
+  maxOffersPerDay: number;
+  remainingToday: number | null;
+  baseZeroBits?: number | null;
+  clientPow?: boolean;
+  maxOpenChallenges?: number;
+  openChallenges?: number;
+  tipEpoch?: string | null;
+  tipEpochs?: Record<string, string>;
+  memorialOnMint?: boolean;
+  memorialOnBurn?: boolean;
+  tipKey?: string | null;
+  servingTipIndex?: number;
+  servingTipCount?: number;
+  powBatonCount?: number | null;
+  raceOpen?: boolean;
+  /** Temple-managed specials (ghosts / events / heroes). */
+  templeSpecials?: {
+    enabled: boolean;
+    deskKeep?: number;
+    burnAtoms?: string;
+    testOffsetDays?: number;
+    profiles?: Array<{
+      profileId: string;
+      id?: string;
+      kind: 'ghost' | 'hero' | 'event';
+      name: string | null;
+      active: boolean;
+      eventDate?: string;
+      eventCalendar?: string;
+      effectiveEventDate?: string;
+      effectiveStartDate?: string;
+      effectiveEndDate?: string;
+      eventRecurrence?: 'yearly' | 'monthly-lunar';
+      lunarMonthEnd?: boolean;
+      birthDate?: string | null;
+      birthPlace?: string | null;
+      storyTitle?: string | null;
+      storyBody?: string | null;
+      storyTitleEn?: string | null;
+      storyBodyEn?: string | null;
+      storyTitleZh?: string | null;
+      storyBodyZh?: string | null;
+      countries?: string[];
+    }>;
+    active?: Array<{
+      profileId: string;
+      id?: string;
+      kind: 'ghost' | 'hero' | 'event';
+      name: string | null;
+      active: boolean;
+      birthPlace?: string | null;
+      storyTitle?: string | null;
+      storyBody?: string | null;
+      storyTitleEn?: string | null;
+      storyBodyEn?: string | null;
+      storyTitleZh?: string | null;
+      storyBodyZh?: string | null;
+      countries?: string[];
+    }>;
+  };
+}
+
+function apiUrl(path: string): string {
+  const base = MINT_API_BASE.replace(/\/$/, '');
+  return `${base}${path}`;
+}
+
+async function readApiJson<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  const trimmed = text.trim();
+  if (!trimmed) {
+    throw new Error(`Mint API empty response (${res.status})`);
+  }
+  if (trimmed.startsWith('<')) {
+    throw new Error(
+      'Mint API not reachable (got HTML). On Contabo: proxy /api → :8787 and start mint-api.',
+    );
+  }
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    throw new Error(
+      `Mint API returned non-JSON (${res.status}): ${trimmed.slice(0, 120)}`,
+    );
+  }
+}
+
+export async function fetchStatus(installId: string): Promise<StatusOk> {
+  const q = encodeURIComponent(installId);
+  const res = await fetch(apiUrl(`/api/status?installId=${q}`));
+  const body = await readApiJson<StatusOk & { error?: string }>(res);
+  if (!res.ok) throw new Error(body.error || `Status ${res.status}`);
+  return body;
+}
+
+/** Soft ownership: whether this installId created the root dedication. */
+export async function fetchRootCreator(opts: {
+  installId: string;
+  rootBurnTxid: string;
+}): Promise<{ isCreator: boolean; known: boolean }> {
+  const q = new URLSearchParams({
+    installId: opts.installId,
+    txid: opts.rootBurnTxid.trim().toLowerCase(),
+  });
+  const res = await fetch(apiUrl(`/api/root-creator?${q}`));
+  const body = await readApiJson<{
+    ok?: boolean;
+    isCreator?: boolean;
+    known?: boolean;
+    error?: string;
+  }>(res);
+  if (!res.ok) throw new Error(body.error || `Root creator ${res.status}`);
+  return {
+    isCreator: body.isCreator === true,
+    known: body.known === true,
+  };
+}
+
+export async function fetchChallenge(opts: {
+  installId: string;
+  note: string;
+  /** Re-offer: link burn to the original dedication burn txid (DANA v2). */
+  parentBurnTxid?: string;
+}): Promise<ChallengeOk> {
+  const res = await fetch(apiUrl('/api/challenge'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      installId: opts.installId,
+      note: opts.note,
+      ...(opts.parentBurnTxid
+        ? { parentBurnTxid: opts.parentBurnTxid }
+        : {}),
+    }),
+  });
+  const body = await readApiJson<ChallengeOk & { error?: string; ok?: boolean }>(
+    res,
+  );
+  if (!res.ok || !body.ok) {
+    throw new Error(body.error || `Challenge failed (${res.status})`);
+  }
+  return body as ChallengeOk;
+}
+
+export async function submitMinedOffer(opts: {
+  installId: string;
+  challengeId: string;
+  nonceHex: string;
+  powMs: number;
+  powAttempts: number;
+}): Promise<OfferOk> {
+  const res = await fetch(apiUrl('/api/submit'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      installId: opts.installId,
+      challengeId: opts.challengeId,
+      nonceHex: opts.nonceHex,
+      powMs: opts.powMs,
+      powAttempts: opts.powAttempts,
+    }),
+  });
+  const body = await readApiJson<OfferOk & { error?: string; ok?: boolean }>(
+    res,
+  );
+  if (!res.ok || !body.ok) {
+    throw new Error(body.error || `Submit failed (${res.status})`);
+  }
+  return body as OfferOk;
+}
+
+/** Memorial burn after soft pray (temple path). Requires submit-issued burnToken. */
+export async function completeOfferBurn(opts: {
+  installId: string;
+  remintTxid: string;
+  burnToken: string;
+}): Promise<BurnOk> {
+  const res = await fetch(apiUrl('/api/burn'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      installId: opts.installId,
+      remintTxid: opts.remintTxid,
+      burnToken: opts.burnToken,
+    }),
+  });
+  const body = await readApiJson<BurnOk & { error?: string; ok?: boolean }>(
+    res,
+  );
+  if (!res.ok || !body.ok) {
+    throw new Error(body.error || `Burn failed (${res.status})`);
+  }
+  return body as BurnOk;
+}
+
+export async function cancelOfferChallenge(opts: {
+  installId: string;
+  challengeId?: string;
+  /** Abandon pending memorial burn after remint (requires burnToken). */
+  remintTxid?: string;
+  burnToken?: string;
+}): Promise<{ ok: true; cancelled: number; abandonedBurns?: number }> {
+  const res = await fetch(apiUrl('/api/cancel'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      installId: opts.installId,
+      challengeId: opts.challengeId,
+      remintTxid: opts.remintTxid,
+      burnToken: opts.burnToken,
+    }),
+  });
+  const body = await readApiJson<{
+    ok: true;
+    cancelled: number;
+    abandonedBurns?: number;
+    error?: string;
+  }>(res);
+  if (!res.ok || !body.ok) {
+    throw new Error(body.error || `Cancel failed (${res.status})`);
+  }
+  return body;
+}
+
+export async function claimTempleSpecial(opts: {
+  installId: string;
+  specialId: string;
+  profileId: string;
+}): Promise<{ ok: true; profileId: string; created: boolean }> {
+  const res = await fetch(apiUrl('/api/specials/claim'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      installId: opts.installId,
+      specialId: opts.specialId,
+      profileId: opts.profileId,
+    }),
+  });
+  const body = await readApiJson<{
+    ok?: boolean;
+    profileId?: string;
+    created?: boolean;
+    error?: string;
+  }>(res);
+  if (!res.ok || !body.ok || !body.profileId) {
+    throw new Error(body.error || `Claim failed (${res.status})`);
+  }
+  return {
+    ok: true,
+    profileId: body.profileId,
+    created: body.created === true,
+  };
+}
+
+export function shortTx(txid: string): string {
+  return `${txid.slice(0, 8)}…${txid.slice(-6)}`;
+}

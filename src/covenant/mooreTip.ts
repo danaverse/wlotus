@@ -1,0 +1,114 @@
+/**
+ * Production Moore + tip EMPP (**DANA** v4).
+ *
+ * Layout (15 bytes) — tipLocktime is enforced in-Script via ctor, not EMPP:
+ *   DANA (4) | ver u8=4 | bits u16 LE | extraBits u32 LE | locktime u32 LE
+ *
+ * Memorial burns use the same LOKAD with ver 1/2 (see `src/offering/wlbrMemorial.ts`).
+ */
+
+import {
+  MOORE_DAY_SECONDS,
+  MOORE_DAYS_PER_EXTRA_BIT,
+  resolveMooreDaysPerExtraBit,
+} from '../params/consensus.js';
+
+/** Tip + memorial share LOKAD `DANA` (`44414e41`). */
+export const DANA_LOKAD = new TextEncoder().encode('DANA');
+/** Tip-state EMPP version (memorial uses 1/2). */
+export const DANA_TIP_VERSION = 4;
+
+/** @deprecated use DANA_LOKAD */
+export const WLPT_LOKAD = DANA_LOKAD;
+/** @deprecated use DANA_TIP_VERSION */
+export const WLPT_VERSION = DANA_TIP_VERSION;
+
+/** Production Moore clock default: +1 bit / {@link MOORE_DAYS_PER_EXTRA_BIT} days. */
+export const PROD_SECONDS_PER_EXTRA_BIT =
+  MOORE_DAYS_PER_EXTRA_BIT * MOORE_DAY_SECONDS;
+
+/** Resolve seconds/bit for a new genesis (env `MOORE_DAYS_PER_EXTRA_BIT`, default 500). */
+export function resolveProdSecondsPerExtraBit(
+  raw?: string,
+): number {
+  return resolveMooreDaysPerExtraBit(raw) * MOORE_DAY_SECONDS;
+}
+
+/** Absolute bit ceiling in WlotusPowRemintMooreTip.spedn. */
+export const MOORE_TIP_MAX_BITS = 128;
+
+export interface MooreTipParams {
+  genesisUnix: number;
+  baseZeroBits: number;
+  secondsPerExtraBit: number;
+  tipLocktime: number;
+}
+
+export interface MooreTipState {
+  locktime: number;
+  tipLocktime: number;
+  extraBits: number;
+  bits: number;
+}
+
+export function computeMooreTipState(
+  locktime: number,
+  params: MooreTipParams,
+): MooreTipState {
+  if (locktime < params.genesisUnix) {
+    throw new Error(
+      `locktime ${locktime} < genesisUnix ${params.genesisUnix}`,
+    );
+  }
+  if (locktime < params.tipLocktime) {
+    throw new Error(
+      `locktime ${locktime} < tipLocktime ${params.tipLocktime} (rewind)`,
+    );
+  }
+  const elapsed = locktime - params.genesisUnix;
+  const extraBits = Math.floor(elapsed / params.secondsPerExtraBit);
+  const bits = params.baseZeroBits + extraBits;
+  if (bits > MOORE_TIP_MAX_BITS) {
+    throw new Error(`bits ${bits} exceeds cap ${MOORE_TIP_MAX_BITS}`);
+  }
+  return {
+    locktime,
+    tipLocktime: params.tipLocktime,
+    extraBits,
+    bits,
+  };
+}
+
+function u16Le(n: number): Uint8Array {
+  if (!Number.isInteger(n) || n < 0 || n > 0xffff) {
+    throw new Error(`u16 out of range: ${n}`);
+  }
+  return new Uint8Array([n & 0xff, (n >>> 8) & 0xff]);
+}
+
+function u32Le(n: number): Uint8Array {
+  if (!Number.isInteger(n) || n < 0 || n >= 0x80000000) {
+    throw new Error(`u32 Script-safe out of range: ${n}`);
+  }
+  const v = n >>> 0;
+  return new Uint8Array([
+    v & 0xff,
+    (v >>> 8) & 0xff,
+    (v >>> 16) & 0xff,
+    (v >>> 24) & 0xff,
+  ]);
+}
+
+/** Build the 15-byte DANA tip v4 EMPP push (must match Spedn covenant). */
+export function danaTipV4Pushdata(state: MooreTipState): Uint8Array {
+  const out = new Uint8Array(15);
+  out.set(DANA_LOKAD, 0);
+  out[4] = DANA_TIP_VERSION;
+  out.set(u16Le(state.bits), 5);
+  out.set(u32Le(state.extraBits), 7);
+  out.set(u32Le(state.locktime), 11);
+  return out;
+}
+
+/** @deprecated use danaTipV4Pushdata */
+export const wlptV4Pushdata = danaTipV4Pushdata;
