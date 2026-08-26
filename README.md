@@ -7,13 +7,13 @@ Burnable white lotus on [eCash](https://e.cash) — offered in memory of the dea
 | App | https://wlotus.org |
 | Explorer | https://danaverse.org |
 | Ticker | **WLOTUS** |
-| Token id | `154d229bab3cf228a2d40b507e1fc5f21a09542ec66776d3e797b455ab77a091` |
+| Token id | `f4e452ef78eaf61908d30ecbd804df5588c6bb6aeea61cf0cbe8bf2186764456` |
 | Covenant | mint **108** = **102** miner + **6** temple |
 | Clock | base **0** bits; +1 bit / **500** days; cap **128** |
 
 This repository is a **public snapshot** of the live covenant and the offerings web UI. It is not the full desk (mint-api, deploy, historical experiments stay private).
 
-Snapshot from `d9d05d5` (`d9d05d503e4c67ae9bee9d156fbeee9c48825276`).
+Snapshot from `v26.8.6` (`71c0904f90fae9a6b9cd13ab73cbee5182b1d255`).
 
 ## Layout
 
