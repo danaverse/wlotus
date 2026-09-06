@@ -506,6 +506,38 @@ export interface CalendarMemorial {
   parentTxid: string;
 }
 
+const CALENDAR_TXID_RE = /^[0-9a-f]{64}$/;
+
+function daysInGregorianMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    return leap ? 29 : 28;
+  }
+  return [31, 0, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0;
+}
+
+/** Full YYYY-MM-DD that exists on the Gregorian calendar. */
+export function isValidGregorianYmd(ymd: string): boolean {
+  const p = parseYmd(ymd);
+  if (!p || p.m < 1 || p.m > 12) return false;
+  return p.d >= 1 && p.d <= daysInGregorianMonth(p.y, p.m);
+}
+
+/** Person / user-event giỗ. Living profiles (no full death day) are omitted. */
+export function calendarMemorialFromAltar(
+  name: string,
+  deathYmd: string,
+  parentTxid: string,
+): CalendarMemorial | null {
+  const death = deathYmd.trim();
+  const txid = parentTxid.trim().toLowerCase();
+  const label = name.trim();
+  if (!isValidGregorianYmd(death) || !CALENDAR_TXID_RE.test(txid) || !label) {
+    return null;
+  }
+  return { name: label, deathYmd: death, parentTxid: txid };
+}
+
 function catalogYearFromSpecial(special: TempleSpecialProfileUi): number {
   return (
     parseYmd(
@@ -601,7 +633,7 @@ export function memorialOnYmd(
   locale: string,
 ): boolean {
   const p = parseYmd(memorial.deathYmd);
-  if (!p) return false;
+  if (!p || !isValidGregorianYmd(memorial.deathYmd)) return false;
   if (p.m === day.solarM && p.d === day.solarD) return true;
   const deathLunar = solarToLunar(p.d, p.m, p.y, lunarTimeZone(locale));
   return (
@@ -647,6 +679,21 @@ export function memorialsInMonth(
   }
   rest.sort((a, b) => a.onYmd.localeCompare(b.onYmd) || a.name.localeCompare(b.name, 'vi'));
   return [...onDay, ...rest];
+}
+
+/** Empty copy under the calendar: remaining month vs this solar day. */
+export type CalendarEmptyKind = 'month' | 'day' | null;
+
+export function calendarEmptyKind(
+  remainingCount: number,
+  selectedDayCount: number,
+  /** Day 1 = whole-month view; do not name that date as empty. */
+  monthView = false,
+): CalendarEmptyKind {
+  if (remainingCount <= 0) return 'month';
+  if (monthView) return null;
+  if (selectedDayCount <= 0) return 'day';
+  return null;
 }
 
 export type AppTab = 'home' | 'calendar';

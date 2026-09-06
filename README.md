@@ -7,20 +7,21 @@ Burnable white lotus on [eCash](https://e.cash) — offered in memory of the dea
 | App | https://wlotus.org |
 | Explorer | https://danaverse.org |
 | Ticker | **WLOTUS** |
-| Token id | `f4e452ef78eaf61908d30ecbd804df5588c6bb6aeea61cf0cbe8bf2186764456` |
-| Covenant | mint **108** = **102** miner + **6** temple |
-| Clock | base **0** bits; +1 bit / **500** days; cap **128** |
+| Token id | `a41bf9d03961a2be83f854c8cea0b3fddf7e275ff3695d9848046052d6db3df9` |
+| Covenant | **WLotusCovenant** — mint **108** miner, no temple tax |
+| Clock | base **0** bits; felt +1 bit / **500** days; cap **128** |
 
-This repository is a **public snapshot** of the live covenant and the offerings web UI. It is not the full desk (mint-api, deploy, historical experiments stay private).
+This repository is a **public snapshot** of the reference covenant and the offerings web UI. It is not the full desk (mint-api, deploy, historical experiments stay private). Forks that copy `WLotusCovenant` with the same economics and `genesisUnix` may exchange 1:1 value-wise.
 
-Snapshot from `v26.8.6` (`71c0904f90fae9a6b9cd13ab73cbee5182b1d255`).
+Snapshot from `9b4b0b0` (`9b4b0b04cc2c00dc1e66bfc7b0ec404771c20ff1`).
 
 ## Layout
 
 ```
-contracts/WlotusPowRemintMooreTipTemple.spedn   # on-chain covenant
-src/covenant/                                   # TypeScript loaders for that covenant
-src/params/wlotusMint.ts                        # 102 / 6 / 108
+contracts/WLotusCovenant.spedn                  # reference remint (forks copy this)
+contracts/WlotusPowRemintMooreTipTemple.spedn   # retired 102/6 temple covenant
+src/covenant/                                   # TypeScript loaders
+src/params/wlotusMint.ts                        # 108 felt / 102/6 temple constants
 apps/web/                                       # offerings PWA source (reference)
 ```
 

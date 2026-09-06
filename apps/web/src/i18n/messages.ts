@@ -5,10 +5,12 @@ export type MessageKey =
   | 'brand'
   /** Wordmark next to the W logo — omit the leading W (it is in the mark). */
   | 'brandWithLogo'
+  | 'headline'
   | 'tagline'
   | 'offerTitle'
   | 'hintPrayMine'
   | 'hintKeepScreen'
+  | 'pushRemindWait'
   | 'howTitle'
   | 'howPrayTitle'
   | 'howPrayBody'
@@ -35,10 +37,23 @@ export type MessageKey =
   | 'altarHonorific'
   | 'altarHonorificMr'
   | 'altarHonorificMrs'
+  | 'altarKindLabel'
+  | 'altarKindPerson'
+  | 'altarKindEvent'
+  | 'altarListedLabel'
+  | 'altarListedYes'
+  | 'altarListedNo'
+  | 'altarListedHint'
+  | 'altarListTitle'
+  | 'altarListHint'
+  | 'altarEventTitle'
+  | 'altarEventHint'
+  | 'altarEventNamePlaceholder'
   | 'altarName'
   | 'altarNamePlaceholder'
   | 'altarNote'
   | 'altarNotePlaceholder'
+  | 'altarNoteBudget'
   | 'altarBirthPlace'
   | 'altarBirthYear'
   | 'altarBirthYearPlaceholder'
@@ -55,6 +70,7 @@ export type MessageKey =
   | 'altarCalLunar'
   | 'altarCalSolar'
   | 'altarDeathPlace'
+  | 'altarEventLocation'
   | 'altarFuneralPlace'
   | 'altarPlaceOptional'
   | 'altarRelationship'
@@ -75,6 +91,7 @@ export type MessageKey =
   | 'altarViewRelated'
   | 'altarErrName'
   | 'altarErrDeathDate'
+  | 'altarErrEventDate'
   | 'altarErrBirthYear'
   | 'altarErrOpreturn'
   | 'btnAltarSave'
@@ -121,7 +138,10 @@ export type MessageKey =
   | 'reofferExtraNotePlaceholder'
   | 'specialPrayerNoteLabel'
   | 'btnAmendAltar'
+  | 'btnListAltar'
+  | 'btnUnlistAltar'
   | 'amendRelationshipCreatorOnly'
+  | 'amendListCreatorOnly'
   | 'firstOfferDeathTitle'
   | 'firstOfferDeathHint'
   | 'btnOfferLotus'
@@ -158,12 +178,18 @@ export type MessageKey =
   | 'searchHintSuffix'
   | 'searchCta'
   | 'homeEventsTitle'
+  | 'homeEventsUpcoming'
+  | 'homeEventsTrending'
   | 'homeEventsOfferings'
+  | 'homeEventsLotuses'
   | 'homeEventsFirstBurn'
   | 'homeEventsDaysUntil'
   | 'homeEventsToday'
   | 'homeEventsOngoing'
   | 'homeEventsDaysPast'
+  | 'homeEventsEmptyUpcoming'
+  | 'homeEventsEmptyTrending'
+  | 'homeEventsLoadingTrending'
   | 'searchLoading'
   | 'searchNoResults'
   | 'searchIndexUnavailable'
@@ -192,12 +218,14 @@ type Dict = Record<MessageKey, string>;
 const en: Dict = {
   brand: 'W Lotus',
   brandWithLogo: 'Lotus',
-  tagline: 'A flower of eternal remembrance.',
+  headline: 'Connecting generations',
+  tagline: 'A flower of remembrance.',
   offerTitle: 'Offer a Flower',
   hintPrayMine:
     'A few minutes of remembrance on this device bring forth lotus flowers for memory and merit.',
   hintKeepScreen:
     'Keep the app open while you pray so the flower offering can continue.',
+  pushRemindWait: 'Automatic calendar reminders for offerings.',
   howTitle: 'How does W Lotus work?',
   howPrayTitle: '',
   howPrayBody:
@@ -231,10 +259,26 @@ const en: Dict = {
   altarHonorific: 'Title',
   altarHonorificMr: 'Mr.',
   altarHonorificMrs: 'Mrs.',
+  altarKindLabel: 'Event',
+  altarKindPerson: 'Person',
+  altarKindEvent: 'Event',
+  altarListedLabel: 'Trending',
+  altarListedYes: 'List',
+  altarListedNo: 'Unlisted',
+  altarListedHint:
+    'Person altars stay off Trending unless the creator lists them later.',
+  altarListTitle: 'Trending',
+  altarListHint:
+    'List this person on Trending, or keep the altar unlisted. Only the creator can change this.',
+  altarEventTitle: 'Event',
+  altarEventHint:
+    'Create an on-chain memorial for an event. The date is the event day, not a death date.',
+  altarEventNamePlaceholder: 'Event name',
   altarName: 'Name',
   altarNamePlaceholder: 'Full name',
   altarNote: 'Words of remembrance',
   altarNotePlaceholder: 'Optional short message',
+  altarNoteBudget: '{used}/{max}',
   altarBirthPlace: 'Hometown',
   altarBirthYear: 'Year of birth',
   altarBirthYearPlaceholder: 'YYYY or YYYY-MM-DD',
@@ -251,6 +295,7 @@ const en: Dict = {
   altarCalLunar: 'Lunar',
   altarCalSolar: 'Solar',
   altarDeathPlace: 'Place of residence',
+  altarEventLocation: 'Location',
   altarFuneralPlace: 'Burial place',
   altarPlaceOptional: 'Optional',
   altarRelationship: 'Relationship',
@@ -273,6 +318,7 @@ const en: Dict = {
   altarViewRelated: 'View linked altar',
   altarErrName: 'Name is required.',
   altarErrDeathDate: 'Enter date of death as YYYY or YYYY-MM-DD.',
+  altarErrEventDate: 'Enter the event date as YYYY or YYYY-MM-DD.',
   altarErrBirthYear: 'Enter year of birth as YYYY or YYYY-MM-DD.',
   altarErrOpreturn:
     'Altar note is too long for the chain. Shorten places or the remembrance note, then try again.',
@@ -325,8 +371,12 @@ const en: Dict = {
   reofferExtraNotePlaceholder: 'Optional…',
   specialPrayerNoteLabel: 'Wish',
   btnAmendAltar: 'Add relationship',
+  btnListAltar: 'Show on Trending',
+  btnUnlistAltar: 'Hide from Trending',
   amendRelationshipCreatorOnly:
     'Only the creator of this altar can add relationships.',
+  amendListCreatorOnly:
+    'Only the creator of this altar can change Trending listing.',
   firstOfferDeathTitle: 'Offer a flower',
   firstOfferDeathHint:
     'Date of death is required. This records it on-chain and offers a flower. Only the creator of this profile can do this.',
@@ -368,12 +418,18 @@ const en: Dict = {
   searchHintSuffix: '.',
   searchCta: 'Search',
   homeEventsTitle: 'Events',
-  homeEventsOfferings: '{n} offerings',
+  homeEventsUpcoming: 'Upcoming',
+  homeEventsTrending: 'Featured',
+  homeEventsOfferings: '{n} lotus',
+  homeEventsLotuses: '{n} lotus',
   homeEventsFirstBurn: 'Be the first to offer',
   homeEventsDaysUntil: 'in {n} days',
   homeEventsToday: 'Today',
   homeEventsOngoing: 'Ongoing',
   homeEventsDaysPast: '{n} days ago',
+  homeEventsEmptyUpcoming: 'No upcoming events.',
+  homeEventsEmptyTrending: 'No offerings to rank yet.',
+  homeEventsLoadingTrending: 'Loading altars…',
   searchLoading: 'Searching…',
   searchNoResults: 'No matches found.',
   searchIndexUnavailable:
@@ -395,7 +451,7 @@ const en: Dict = {
   calendarNextMonth: 'Next month',
   calendarToday: 'Today',
   calendarViewToday: 'View today',
-  calendarEmptyDay: 'No observances on this day.',
+  calendarEmptyDay: 'No observances on {d}/{m}.',
   calendarEmptyMonth: 'No observances this month.',
   calendarMemorialsHeading: 'Memorial days',
 };
@@ -405,12 +461,14 @@ const en: Dict = {
 const vi: Dict = {
   brand: 'W Lotus',
   brandWithLogo: 'Lotus',
-  tagline: 'Bông hoa của sự tưởng nhớ vĩnh hằng.',
+  headline: 'Kết nối các thế hệ',
+  tagline: 'Bông sen của sự tưởng nhớ.',
   offerTitle: 'Dâng Hoa',
   hintPrayMine:
     'Một vài phút tưởng niệm trên máy sẽ sản sinh ra hoa sen để tưởng nhớ và công đức.',
   hintKeepScreen:
     'Giữ ứng dụng luôn mở để quá trình tìm kiếm và dâng hoa được tiếp tục.',
+  pushRemindWait: 'Tự động nhắc lịch cho các lần dâng.',
   howTitle: 'W Lotus hoạt động như thế nào?',
   howPrayTitle: '',
   howPrayBody:
@@ -444,10 +502,26 @@ const vi: Dict = {
   altarHonorific: 'Danh xưng',
   altarHonorificMr: 'Ông',
   altarHonorificMrs: 'Bà',
+  altarKindLabel: 'Sự kiện',
+  altarKindPerson: 'Người',
+  altarKindEvent: 'Sự kiện',
+  altarListedLabel: 'Xu hướng',
+  altarListedYes: 'Hiện',
+  altarListedNo: 'Ẩn',
+  altarListedHint:
+    'Ban thờ người mặc định không hiện trên Xu hướng. Chỉ người lập mới đổi được sau này.',
+  altarListTitle: 'Xu hướng',
+  altarListHint:
+    'Hiện ban thờ này trên Xu hướng, hoặc giữ ẩn. Chỉ người lập ban thờ mới đổi được.',
+  altarEventTitle: 'Sự kiện',
+  altarEventHint:
+    'Tạo ban thờ trên chuỗi cho một sự kiện. Ngày ở đây là ngày sự kiện, không phải ngày mất.',
+  altarEventNamePlaceholder: 'Tên sự kiện',
   altarName: 'Họ tên',
   altarNamePlaceholder: 'Họ và tên',
   altarNote: 'Lời nguyện',
   altarNotePlaceholder: 'Tuỳ chọn — lời ngắn',
+  altarNoteBudget: '{used}/{max}',
   altarBirthPlace: 'Quê quán',
   altarBirthYear: 'Năm sinh',
   altarBirthYearPlaceholder: 'YYYY hoặc YYYY-MM-DD',
@@ -464,6 +538,7 @@ const vi: Dict = {
   altarCalLunar: 'Âm lịch',
   altarCalSolar: 'Dương lịch',
   altarDeathPlace: 'Nơi sinh sống',
+  altarEventLocation: 'Địa điểm',
   altarFuneralPlace: 'Nơi an táng',
   altarPlaceOptional: 'Tuỳ chọn',
   altarRelationship: 'Mối quan hệ',
@@ -486,6 +561,7 @@ const vi: Dict = {
   altarViewRelated: 'Xem ban thờ liên quan',
   altarErrName: 'Cần nhập họ tên.',
   altarErrDeathDate: 'Ngày mất dạng YYYY hoặc YYYY-MM-DD.',
+  altarErrEventDate: 'Ngày sự kiện dạng YYYY hoặc YYYY-MM-DD.',
   altarErrBirthYear: 'Năm sinh dạng YYYY hoặc YYYY-MM-DD.',
   altarErrOpreturn:
     'Nội dung ban thờ quá dài cho chuỗi khối. Hãy rút gọn nơi chốn hoặc lời tưởng nhớ rồi thử lại.',
@@ -537,8 +613,12 @@ const vi: Dict = {
   reofferExtraNotePlaceholder: 'Tuỳ chọn…',
   specialPrayerNoteLabel: 'Lời nguyện',
   btnAmendAltar: 'Thêm mối quan hệ',
+  btnListAltar: 'Hiện trên Xu hướng',
+  btnUnlistAltar: 'Ẩn khỏi Xu hướng',
   amendRelationshipCreatorOnly:
     'Chỉ người tạo ban thờ mới có thể thêm mối quan hệ.',
+  amendListCreatorOnly:
+    'Chỉ người lập ban thờ mới đổi được hiện trên Xu hướng.',
   firstOfferDeathTitle: 'Dâng hoa',
   firstOfferDeathHint:
     'Bắt buộc nhập ngày mất. Lần này ghi ngày mất trên chuỗi và dâng hoa. Chỉ người tạo hồ sơ mới làm được.',
@@ -580,12 +660,18 @@ const vi: Dict = {
   searchHintSuffix: '.',
   searchCta: 'Tìm kiếm',
   homeEventsTitle: 'Sự kiện',
-  homeEventsOfferings: '{n} dâng hoa',
+  homeEventsUpcoming: 'Sắp tới',
+  homeEventsTrending: 'Nổi bật',
+  homeEventsOfferings: '{n} sen',
+  homeEventsLotuses: '{n} sen',
   homeEventsFirstBurn: 'Hãy là người dâng đầu tiên',
   homeEventsDaysUntil: 'còn {n} ngày',
   homeEventsToday: 'Hôm nay',
   homeEventsOngoing: 'Đang diễn ra',
   homeEventsDaysPast: '{n} ngày trước',
+  homeEventsEmptyUpcoming: 'Chưa có sự kiện sắp tới.',
+  homeEventsEmptyTrending: 'Chưa có dâng hoa để xếp hạng.',
+  homeEventsLoadingTrending: 'Đang tải ban thờ…',
   searchLoading: 'Đang tìm…',
   searchNoResults: 'Không tìm thấy kết quả.',
   searchIndexUnavailable:
@@ -607,7 +693,7 @@ const vi: Dict = {
   calendarNextMonth: 'Tháng sau',
   calendarToday: 'Hôm nay',
   calendarViewToday: 'Xem hôm nay',
-  calendarEmptyDay: 'Ngày này không có lễ hay giỗ.',
+  calendarEmptyDay: 'Ngày {d}/{m} không có ngày lễ / giỗ…',
   calendarEmptyMonth: 'Tháng này không có lễ hay giỗ.',
   calendarMemorialsHeading: 'Ngày giỗ',
 };
@@ -617,12 +703,14 @@ const vi: Dict = {
 const zh: Dict = {
   brand: 'W Lotus',
   brandWithLogo: 'Lotus',
-  tagline: '永恒追思之花。',
+  headline: '连接世代',
+  tagline: '追思之花。',
   offerTitle: '献花',
   hintPrayMine:
     '在本机上花几分钟追思，即可生出莲花，用于功德与纪念。',
   hintKeepScreen:
     '祈祷时请保持应用常开，以便献花过程得以继续。',
+  pushRemindWait: '自动提醒献花日程。',
   howTitle: 'W Lotus 如何运作？',
   howPrayTitle: '',
   howPrayBody:
@@ -657,10 +745,23 @@ const zh: Dict = {
   altarHonorific: '称谓',
   altarHonorificMr: '先生',
   altarHonorificMrs: '女士',
+  altarKindLabel: '事件',
+  altarKindPerson: '人物',
+  altarKindEvent: '事件',
+  altarListedLabel: '热门',
+  altarListedYes: '公开',
+  altarListedNo: '不公开',
+  altarListedHint: '人物灵位默认不出现在热门中。仅创建者可之后再改。',
+  altarListTitle: '热门',
+  altarListHint: '将此人物公开到热门，或保持不公开。仅创建者可更改。',
+  altarEventTitle: '事件',
+  altarEventHint: '在链上为事件设立灵位。日期为事件日，而非忌日。',
+  altarEventNamePlaceholder: '事件名称',
   altarName: '姓名',
   altarNamePlaceholder: '姓名',
   altarNote: '追思寄语',
   altarNotePlaceholder: '可选短句',
+  altarNoteBudget: '{used}/{max}',
   altarBirthPlace: '籍贯',
   altarBirthYear: '出生年',
   altarBirthYearPlaceholder: 'YYYY 或 YYYY-MM-DD',
@@ -677,6 +778,7 @@ const zh: Dict = {
   altarCalLunar: '农历',
   altarCalSolar: '阳历',
   altarDeathPlace: '居住地',
+  altarEventLocation: '地点',
   altarFuneralPlace: '安葬地',
   altarPlaceOptional: '可选',
   altarRelationship: '关系',
@@ -698,6 +800,7 @@ const zh: Dict = {
   altarViewRelated: '查看关联灵位',
   altarErrName: '请填写姓名。',
   altarErrDeathDate: '去世日期请用 YYYY 或 YYYY-MM-DD。',
+  altarErrEventDate: '事件日期请用 YYYY 或 YYYY-MM-DD。',
   altarErrBirthYear: '出生年请用 YYYY 或 YYYY-MM-DD。',
   altarErrOpreturn: '灵位内容过长，无法上链。请缩短地点或纪念文字后再试。',
   btnAltarSave: '保存',
@@ -746,7 +849,10 @@ const zh: Dict = {
   reofferExtraNotePlaceholder: '可选…',
   specialPrayerNoteLabel: '心愿',
   btnAmendAltar: '添加关系',
+  btnListAltar: '公开到热门',
+  btnUnlistAltar: '从热门隐藏',
   amendRelationshipCreatorOnly: '仅档案创建者可添加关系。',
+  amendListCreatorOnly: '仅档案创建者可更改热门公开。',
   firstOfferDeathTitle: '献花',
   firstOfferDeathHint:
     '必须填写去世日期。本次会在链上记录去世日期并献花。仅档案创建者可操作。',
@@ -787,12 +893,18 @@ const zh: Dict = {
   searchHintSuffix: '。',
   searchCta: '搜索',
   homeEventsTitle: '活动',
-  homeEventsOfferings: '{n} 次供奉',
+  homeEventsUpcoming: '即将',
+  homeEventsTrending: '精选',
+  homeEventsOfferings: '{n} 朵莲花',
+  homeEventsLotuses: '{n} 朵莲花',
   homeEventsFirstBurn: '成为第一位献花者',
   homeEventsDaysUntil: '还有 {n} 天',
   homeEventsToday: '今天',
   homeEventsOngoing: '进行中',
   homeEventsDaysPast: '{n} 天前',
+  homeEventsEmptyUpcoming: '暂无即将到来的活动。',
+  homeEventsEmptyTrending: '暂无可供排名的供奉。',
+  homeEventsLoadingTrending: '正在加载祭坛…',
   searchLoading: '搜索中…',
   searchNoResults: '未找到匹配结果。',
   searchIndexUnavailable: '无法连接追思索引 — 仅显示本机记录。',
@@ -812,7 +924,7 @@ const zh: Dict = {
   calendarNextMonth: '下个月',
   calendarToday: '今天',
   calendarViewToday: '查看今天',
-  calendarEmptyDay: '这一天没有节日或忌日。',
+  calendarEmptyDay: '{m}月{d}日没有节日或忌日。',
   calendarEmptyMonth: '这个月没有节日或忌日。',
   calendarMemorialsHeading: '忌日',
 };
