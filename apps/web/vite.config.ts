@@ -1,6 +1,26 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+
+/** Absolute OG URLs for the host this SPA is built for (test vs prod). */
+function ogOriginPlugin(): Plugin {
+  const origin = (process.env.VITE_PUBLIC_SITE_ORIGIN || '').replace(/\/$/, '');
+  return {
+    name: 'wlotus-og-origin',
+    transformIndexHtml(html) {
+      if (!origin) return html;
+      return html
+        .replaceAll(
+          'content="/images/og.png"',
+          `content="${origin}/images/og.png"`,
+        )
+        .replace(
+          '<meta property="og:type" content="website" />',
+          `<meta property="og:type" content="website" />\n    <meta property="og:url" content="${origin}/" />`,
+        );
+    },
+  };
+}
 
 export default defineConfig({
   define: {
@@ -13,7 +33,11 @@ export default defineConfig({
   },
   plugins: [
     react(),
+    ogOriginPlugin(),
     VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
       registerType: 'autoUpdate',
       // App registers the SW itself (apps/web/src/lib/pwaUpdate.ts) with a
       // versioned URL — don't also auto-inject vite-plugin-pwa's own
@@ -30,6 +54,9 @@ export default defineConfig({
         'images/wlotus-icon-192.png',
         'images/wlotus-icon-512.png',
         'images/wlotus-icon-maskable-512.png',
+        'images/og.png',
+        'images/og-en.png',
+        'images/og-zh.png',
       ],
       manifest: {
         id: '/',
@@ -69,26 +96,11 @@ export default defineConfig({
           },
         ],
       },
-      workbox: {
+      injectManifest: {
         // Fresh check often so deploys land quickly on phones
-        clientsClaim: true,
-        skipWaiting: true,
-        navigationPreload: false,
-        // Main JS is ~2.1 MB (ecash-lib). Default 2 MiB would fail the build
-        // and drop the app shell from the SW precache.
+        injectionPoint: 'self.__WB_MANIFEST',
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,wasm}'],
-        navigateFallback: '/index.html',
-        runtimeCaching: [
-          {
-            urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
-            handler: 'NetworkOnly',
-          },
-          {
-            urlPattern: ({ url }) => url.pathname.startsWith('/index-api/'),
-            handler: 'NetworkOnly',
-          },
-        ],
       },
       devOptions: { enabled: false },
     }),

@@ -5,6 +5,7 @@
  * Wire (UTF-8), Unit Separator U+001F between fields:
  *   title \x1f name \x1f note \x1f birthPlace \x1f birthYear \x1f deathDate
  *     \x1f deathPlace \x1f funeralPlace \x1f relationshipType \x1f relatedTxid
+ *     \x1f kind \x1f dateCalendar \x1f listed
  *
  * Star-fragment burns under a root do **not** re-pack the full altar:
  *   - Re-offer: DANA v2 parent = root + optional free-text memorial message
@@ -12,6 +13,8 @@
  *   - Relationship: DANA v2 parent = root + relationship slots only
  *   - Death date: DANA v2 parent = root + deathDate (+ optional places)
  *     when the root was created as a living profile (empty death date)
+ *   - List / unlist: DANA v2 parent = root + compact `l` / `u` (person
+ *     Trending opt-in). Events trend without this flag.
  * Root identity (name / honorific / birth) is written once; death date may be
  * added later via a star fragment. Clients merge burns under a star for display.
  *
@@ -31,7 +34,23 @@
  * Writing relationship links is intentionally left OPEN (any device, at
  * setup or later via a relationship star-fragment) — see docs/ALTAR.md
  * § "Relationships — open for now, restrict later".
+ *
+ * `kind` / `dateCalendar` (fields 11–12) mark a user altar as an **event**
+ * (`e`) and whether the date slot should display as lunar (`l`) or solar
+ * (`s`). Empty kind = person / memorial. The civil `deathDate` slot is
+ * always solar YYYY-MM-DD (same as temple specials); lunar is a display
+ * conversion from that day. Field 13 (`listed`) is person-altar Trending
+ * opt-in (`l` = listed). Missing / empty / `u` = unlisted — every current
+ * person altar is unlisted until the creator lists it. Old clients ignore
+ * trailing extra parts. Temple catalog specials (packed before `kind=event`)
+ * still rank on Trending by catalog name / bound profileId.
  */
+
+import {
+  findCatalogEntryByName,
+  foldSpecialName,
+  templeSpecialCatalog,
+} from '../params/templeSpecialCatalog.js';
 
 export const ALTAR_SEP = '\u001f';
 
@@ -42,22 +61,37 @@ export const ALTAR_SEP = '\u001f';
 export const OP_RETURN_SCRIPT_MAX_BYTES = 223;
 
 /**
- * Max UTF-8 bytes for the DANA memorial *note* so the full burn OP_RETURN
- * (ALP BURN + DANA EMPP, offeringId `wlotus`) stays ≤ 223.
+ * Max UTF-8 bytes for the DANA memorial *note* so a **BURN + DATA** OP_RETURN
+ * (offeringId `wlotus`) stays ≤ 223. Temple burns also try to SEND leftover
+ * miner inventory in the same tx; if that overflows, `burnOnePrayer` retries
+ * without leftover SEND so the flower still lands.
  *
- * Empirically measured with ecash-lib `emppScript([alpBurn, memorial])`:
- *   - DANA v1 (root, no parent): note ≤ 157
- *   - DANA v2 (re-offer / relationship with 32-byte parent): note ≤ 124
+ * Caps are UTF-8 **bytes**, not characters. Vietnamese accented letters are
+ * typically 2–3 bytes each; Chinese/Japanese (han/kana) are typically 3.
+ * A “short” memorial still fills this. Truncation is per code point so a
+ * CJK glyph is never split mid-character.
  *
- * Soft caps leave a small margin under those ceilings.
- * EMPP `noteLen` is still a u8 (max 255) — the OP_RETURN limit binds first.
+ * Measured with `emppScript([alpSend, alpBurn, memorial])` / without SEND:
+ *   - DANA v1 (root): note ≤ 157 without SEND (150 → ~216). With leftover
+ *     SEND, 140 + SEND is **262** (the production error).
+ *   - DANA v2 (32-byte parent txid): note ≤ 124 without SEND (120 → ~219).
+ *     Leftover SEND still fits for extras ≲ 69 bytes; larger extras retry
+ *     without SEND. Re-offers do **not** re-pack the root altar — only the
+ *     parent txid plus optional extra remembrance text.
+ *
+ * Older 150 / 120 caps were treated as always-safe including leftover SEND.
+ * They are not. EMPP `noteLen` is still a u8 (max 255) — 223 binds first.
  */
 export const MEMORIAL_NOTE_MAX_BYTES = 150;
-/** Stricter note budget when DANA v2 embeds a parent burn txid. */
+/**
+ * Extra remembrance *text* on DANA v2 (re-offer / amend). The 32-byte parent
+ * txid is the only root pointer. Relationship fragments (~74 bytes) fit.
+ * Measured: 120-byte note + BURN + DATA = 219 (limit 223).
+ */
 export const MEMORIAL_NOTE_MAX_BYTES_WITH_PARENT = 120;
 
-/** Soft UI cap for the free-text quick-offer note (characters). */
-export const MEMORIAL_NOTE_MAX_CHARS = 200;
+/** Soft UI cap for the free-text quick-offer note (characters). Prefer bytes. */
+export const MEMORIAL_NOTE_MAX_CHARS = 100;
 
 /** On-chain honorific codes (render via locale in the UI / OG). */
 export type AltarHonorific = '' | 'mr' | 'mrs';
@@ -70,6 +104,12 @@ export type AltarRelationshipType = '' | 'spouse' | 'parent' | 'child';
 
 /** Non-empty relationship kinds used in link lists. */
 export type AltarRelationshipKind = Exclude<AltarRelationshipType, ''>;
+
+/** Person memorial (empty) or a dated event (`event`). */
+export type AltarKind = '' | 'event';
+
+/** Preferred display/input calendar for the death / event date slot. */
+export type AltarDateCalendar = '' | 'lunar' | 'solar';
 
 export type AltarLocale = 'vi' | 'en' | 'zh';
 
@@ -96,13 +136,26 @@ export interface AltarFields {
    */
   birthYear: string;
   /**
-   * Date of death — optional. Empty = living profile (Setup only; no
-   * flower re-offer until a death-date star fragment is added).
+   * Date of death, or **event date** when {@link kind} is `event`.
+   * Optional for a living person (Setup only; no flower re-offer until a
+   * death-date star fragment is added). Required for events.
    * Same shapes as birthYear: `YYYY`, `YYYY-MM`, or `YYYY-MM-DD`.
+   * On the wire this is the **solar** civil day; {@link dateCalendar} says
+   * whether the UI should show lunar or solar.
    */
   deathDate: string;
   deathPlace: string;
   funeralPlace: string;
+  /**
+   * Empty = person / living profile. `event` = the date slot is an event
+   * day (not a death date) and person-only fields stay empty.
+   */
+  kind: AltarKind;
+  /**
+   * How the date slot should display: `lunar` | `solar`. Empty = legacy
+   * (clients default the details toggle).
+   */
+  dateCalendar: AltarDateCalendar;
   /**
    * Draft / single-note wire slots (one link per packed note). Prefer
    * {@link relationships} after merging star burns for display.
@@ -114,6 +167,12 @@ export interface AltarFields {
    * Deletion is not supported yet — future burns may mark links deleted.
    */
   relationships: AltarRelationshipLink[];
+  /**
+   * Person-altar Trending opt-in. `true` = listed, `false` = explicitly
+   * unlisted, `null` = not stated (treated as unlisted). Events trend
+   * without this flag. Existing person notes have no slot → unlisted.
+   */
+  listed: boolean | null;
 }
 
 export function emptyAltarFields(): AltarFields {
@@ -129,6 +188,9 @@ export function emptyAltarFields(): AltarFields {
     relationshipType: '',
     relatedTxid: '',
     relationships: [],
+    kind: '',
+    dateCalendar: '',
+    listed: null,
   };
 }
 
@@ -195,11 +257,15 @@ function scrub(raw: string): string {
   return raw.replaceAll(ALTAR_SEP, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function utf8ByteLength(raw: string): number {
+export function utf8ByteLength(raw: string): number {
   return new TextEncoder().encode(raw).length;
 }
 
-export function memorialNoteMaxBytes(hasParentBurnTxid: boolean): number {
+/**
+ * Packed-note cap on the wire: 150 (v1) or 100 (v2 parent).
+ * Extra v2 *text* in the UI uses the v2 cap. Caps are UTF-8 bytes.
+ */
+export function memorialNoteMaxBytes(hasParentBurnTxid?: boolean): number {
   return hasParentBurnTxid
     ? MEMORIAL_NOTE_MAX_BYTES_WITH_PARENT
     : MEMORIAL_NOTE_MAX_BYTES;
@@ -229,6 +295,112 @@ function wireRelationshipType(t: AltarRelationshipType): string {
   if (t === 'parent') return 'p';
   if (t === 'child') return 'c';
   return '';
+}
+
+export function normalizeAltarKind(
+  raw: string | null | undefined,
+): AltarKind {
+  const t = (raw || '').trim().toLowerCase();
+  if (t === 'event' || t === 'e') return 'event';
+  return '';
+}
+
+export function normalizeAltarDateCalendar(
+  raw: string | null | undefined,
+): AltarDateCalendar {
+  const t = (raw || '').trim().toLowerCase();
+  if (t === 'lunar' || t === 'l') return 'lunar';
+  if (t === 'solar' || t === 's') return 'solar';
+  return '';
+}
+
+export function altarIsEvent(
+  a: Pick<AltarFields, 'kind'> | null | undefined,
+): boolean {
+  return normalizeAltarKind(a?.kind) === 'event';
+}
+
+function wireAltarKind(k: AltarKind): string {
+  return k === 'event' ? 'e' : '';
+}
+
+function wireAltarDateCalendar(c: AltarDateCalendar): string {
+  if (c === 'lunar') return 'l';
+  if (c === 'solar') return 's';
+  return '';
+}
+
+/** Packed listed slot: only write `l` when the creator opted in. */
+function wireAltarListed(listed: boolean | null | undefined): string {
+  return listed === true ? 'l' : '';
+}
+
+/**
+ * Field 13 / compact list amend. `l` = listed, `u` = unlisted,
+ * empty / unknown = not stated.
+ */
+export function normalizeAltarListed(
+  raw: string | null | undefined,
+): boolean | null {
+  const t = (raw || '').trim().toLowerCase();
+  if (t === 'l' || t === 'listed' || t === '1' || t === 'true') return true;
+  if (t === 'u' || t === 'unlisted' || t === '0' || t === 'false') return false;
+  return null;
+}
+
+/** Events always trend; person altars only when explicitly listed. */
+export function altarIsTrendingEligible(
+  fields: AltarFields | null | undefined,
+): boolean {
+  if (!fields) return false;
+  if (altarIsEvent(fields)) return true;
+  return fields.listed === true;
+}
+
+/**
+ * Temple catalog specials (Vu Lan, Nepal, All Hallows, HCM, …) were packed
+ * before `kind=event` existed. They stay on Trending; user person altars
+ * do not unless listed.
+ */
+export function altarIsCatalogTrendingName(
+  name: string | null | undefined,
+): boolean {
+  const raw = (name || '').trim();
+  if (!raw) return false;
+  if (findCatalogEntryByName(raw)) return true;
+  const key = foldSpecialName(raw);
+  if (!key) return false;
+  return templeSpecialCatalog().some(e => foldSpecialName(e.altarName) === key);
+}
+
+/** Merge packed notes (latest-first) then apply {@link altarIsTrendingEligible}. */
+export function altarNotesAreTrendingEligible(
+  notes: Iterable<string>,
+  opts?: { rootTxid?: string; catalogProfileIds?: ReadonlySet<string> },
+): boolean {
+  const list = [...notes];
+  const merged = mergeAltarFields(list);
+  if (altarIsTrendingEligible(merged)) return true;
+  const root = (opts?.rootTxid || '').trim().toLowerCase();
+  if (root && opts?.catalogProfileIds?.has(root)) return true;
+  const names = new Set<string>();
+  if (merged?.name) names.add(merged.name);
+  if (merged) {
+    const titled = formatAltarPersonName(merged);
+    if (titled) names.add(titled);
+  }
+  for (const raw of list) {
+    const t = raw.trim();
+    if (!t) continue;
+    const display = memorialDisplayName(t);
+    if (display) names.add(display);
+    const bare = altarBareNameFromNote(t);
+    if (bare) names.add(bare);
+  }
+  for (const name of names) {
+    if (altarIsCatalogTrendingName(name)) return true;
+  }
+  return false;
 }
 
 /** Lowercase 64-hex burn txid, or '' if not a valid shape. */
@@ -365,6 +537,35 @@ export function formatAltarPersonName(
   return prefix ? `${prefix} ${name}` : name;
 }
 
+/**
+ * Split a combined person line (`Ông Cao Lâm Quả` / `Mr. Name`) back into
+ * wire title + bare name. A lone honorific stays in `name` so typing is
+ * not eaten. Unknown prefixes stay in `name`.
+ */
+export function parseAltarPersonName(raw: string): {
+  title: AltarHonorific;
+  name: string;
+} {
+  const text = scrub(raw);
+  if (!text) return { title: '', name: '' };
+  const prefixes: { re: RegExp; title: 'mr' | 'mrs' }[] = [
+    { re: /^(mrs\.?)\s+/i, title: 'mrs' },
+    { re: /^(mr\.?)\s+/i, title: 'mr' },
+    { re: /^(bà|ba)\s+/i, title: 'mrs' },
+    { re: /^(ông|ong)\s+/i, title: 'mr' },
+    { re: /^(女士)\s*/, title: 'mrs' },
+    { re: /^(先生)\s*/, title: 'mr' },
+  ];
+  for (const p of prefixes) {
+    const m = p.re.exec(text);
+    if (!m) continue;
+    const name = scrub(text.slice(m[0].length));
+    if (!name) return { title: '', name: text };
+    return { title: p.title, name };
+  }
+  return { title: '', name: text };
+}
+
 /** True when the on-chain note uses altar separator packing. */
 export function isAltarPackedNote(raw: string): boolean {
   return raw.includes(ALTAR_SEP);
@@ -382,7 +583,54 @@ function isTitleFirstWire(parts: string[]): boolean {
   return raw0 === '' && parts.length >= 2;
 }
 
+/**
+ * Tight relationship star fragment: `s|p|c` + SEP + 64-hex related txid
+ * (+ optional SEP + memorial text). 66 bytes without extra text — fits
+ * leftover ALP SEND + DANA v2 under the 223-byte OP_RETURN (the 10-slot
+ * pack is 74 bytes and sits on the 223 edge, so felt listing burns fail).
+ */
+const COMPACT_REL_RE =
+  /^([spc])\u001f([0-9a-fA-F]{64})(?:\u001f(.*))?$/;
+
+/**
+ * Tight list / unlist star fragment: `l` or `u` + SEP (+ optional text).
+ * Rest is a single field so a legacy name-first root named `l` / `u`
+ * with more slots falls through to packed parse. Must run before
+ * title-first / legacy so a true fragment is not read as `name='l'`.
+ * Does not collide with {@link COMPACT_REL_RE} (`s`/`p`/`c` + 64-hex).
+ */
+const COMPACT_LIST_RE = /^([lu])\u001f([^\u001f]*)$/;
+
+function parseCompactListNote(raw: string): AltarFields | null {
+  const m = COMPACT_LIST_RE.exec(raw);
+  if (!m) return null;
+  const listed = normalizeAltarListed(m[1]);
+  if (listed === null) return null;
+  const fields = emptyAltarFields();
+  fields.listed = listed;
+  fields.note = (m[2] ?? '').trim();
+  return fields;
+}
+
+function parseCompactRelationshipNote(raw: string): AltarFields | null {
+  const m = COMPACT_REL_RE.exec(raw);
+  if (!m) return null;
+  const type = normalizeAltarRelationshipType(m[1]);
+  const txid = normalizeAltarRelatedTxid(m[2]);
+  if (!type || !txid) return null;
+  const fields = emptyAltarFields();
+  fields.relationshipType = type;
+  fields.relatedTxid = txid;
+  fields.note = (m[3] ?? '').trim();
+  fields.relationships = linksFromSingularFields(type, txid);
+  return fields;
+}
+
 export function parseAltarNote(raw: string): AltarFields | null {
+  const listAmend = parseCompactListNote(raw);
+  if (listAmend) return listAmend;
+  const compact = parseCompactRelationshipNote(raw);
+  if (compact) return compact;
   if (!isAltarPackedNote(raw)) return null;
   const parts = raw.split(ALTAR_SEP);
   let fields: AltarFields;
@@ -398,6 +646,9 @@ export function parseAltarNote(raw: string): AltarFields | null {
       funeralPlace: (parts[7] ?? '').trim(),
       relationshipType: normalizeAltarRelationshipType(parts[8]),
       relatedTxid: normalizeAltarRelatedTxid(parts[9]),
+      kind: normalizeAltarKind(parts[10]),
+      dateCalendar: normalizeAltarDateCalendar(parts[11]),
+      listed: normalizeAltarListed(parts[12]),
       relationships: [],
     };
   } else {
@@ -413,6 +664,9 @@ export function parseAltarNote(raw: string): AltarFields | null {
       funeralPlace: (parts[6] ?? '').trim(),
       relationshipType: normalizeAltarRelationshipType(parts[7]),
       relatedTxid: normalizeAltarRelatedTxid(parts[8]),
+      kind: '',
+      dateCalendar: '',
+      listed: null,
       relationships: [],
     };
   }
@@ -425,8 +679,10 @@ export function parseAltarNote(raw: string): AltarFields | null {
 
 /**
  * Merge altar-packed notes (latest-first for identity fields).
- * Relationships are collected add-only from every packed note (oldest first)
- * so multiple spouse/parent/child star fragments all show up.
+ * `listed` is latest-wins (`??`): the first explicit `l` / `u` in that
+ * scan sticks, so unlist after list works. Relationships are collected
+ * add-only from every packed note (oldest first) so multiple
+ * spouse/parent/child star fragments all show up.
  */
 export function mergeAltarFields(
   notes: Iterable<string>,
@@ -454,6 +710,9 @@ export function mergeAltarFields(
       deathDate: merged.deathDate || parsed.deathDate,
       deathPlace: merged.deathPlace || parsed.deathPlace,
       funeralPlace: merged.funeralPlace || parsed.funeralPlace,
+      kind: merged.kind || parsed.kind,
+      dateCalendar: merged.dateCalendar || parsed.dateCalendar,
+      listed: merged.listed ?? parsed.listed,
       relationshipType: '',
       relatedTxid: '',
       relationships: [],
@@ -587,7 +846,9 @@ export function validateAltarFields(a: AltarFields): string | null {
   if (titleRaw && !normalizeAltarHonorific(titleRaw)) return 'title';
   if (!scrub(a.name)) return 'name';
   const death = scrub(a.deathDate);
-  // Empty = living profile; non-empty must be a valid date shape.
+  const isEvent = altarIsEvent(a);
+  // Events require a date (the event day). Living people may omit it.
+  if (isEvent && !death) return 'deathDate';
   if (death && !ALTAR_DATE_RE.test(death)) return 'deathDate';
   const birth = scrub(a.birthYear);
   if (birth && !ALTAR_DATE_RE.test(birth)) return 'birthYear';
@@ -632,6 +893,52 @@ export function isRelationshipAmendNote(
   if (!normalizeAltarRelationshipType(parsed.relationshipType)) return false;
   if (!normalizeAltarRelatedTxid(parsed.relatedTxid)) return false;
   return true;
+}
+
+/**
+ * True when the note is a compact list / unlist star fragment
+ * (`l\x1f` / `u\x1f`) — used to gate creator-only Trending amends.
+ */
+export function isListAmendNote(raw: string | null | undefined): boolean {
+  return parseCompactListNote((raw || '').trim()) !== null;
+}
+
+/** Compact list (`l\x1f`) or unlist (`u\x1f`) star fragment. */
+export function encodeListNote(listed: boolean): string {
+  return listed ? `l${ALTAR_SEP}` : `u${ALTAR_SEP}`;
+}
+
+/**
+ * Re-offer extras are **plain remembrance text** plus DANA v2 `parentBurnTxid`.
+ * If a packed altar note is supplied by mistake, keep only the remembrance
+ * slot so name / places / dates / links are not rewritten on the flower burn.
+ */
+export function reofferExtraNote(raw: string | null | undefined): string {
+  const t = (raw || '').trim();
+  if (!t) return '';
+  const packed = parseAltarNote(t);
+  if (!packed) return t;
+  return scrub(packed.note);
+}
+
+/**
+ * Note that goes in the DANA EMPP push. Star fragments (death / relationship
+ * / list) stay packed; every other parent burn is a re-offer extra.
+ */
+export function prepareDanaNote(
+  raw: string | null | undefined,
+  hasParentBurnTxid: boolean,
+): string {
+  const t = (raw || '').trim();
+  if (!hasParentBurnTxid) return t;
+  if (
+    isDeathDateAmendNote(t) ||
+    isRelationshipAmendNote(t) ||
+    isListAmendNote(t)
+  ) {
+    return t;
+  }
+  return reofferExtraNote(t);
 }
 
 /** Relationship pair only (for relationship star-fragment burns). */
@@ -708,6 +1015,11 @@ export function encodeAltarNote(
   let birthYear = scrub(fields.birthYear);
   let deathPlace = scrub(fields.deathPlace);
   let funeralPlace = scrub(fields.funeralPlace);
+  const kind = wireAltarKind(normalizeAltarKind(fields.kind));
+  const dateCalendar = wireAltarDateCalendar(
+    normalizeAltarDateCalendar(fields.dateCalendar),
+  );
+  let listed = wireAltarListed(fields.listed);
 
   const pack = (): string =>
     joinAltarParts([
@@ -721,14 +1033,20 @@ export function encodeAltarNote(
       funeralPlace,
       wireRelationshipType(relType),
       relTxid,
+      kind,
+      dateCalendar,
+      listed,
     ]);
 
+  const originalNote = note;
   const dropOrder: Array<() => void> = [
     () => {
       funeralPlace = '';
     },
     () => {
       note = '';
+      const overhead = utf8ByteLength(pack());
+      note = truncateUtf8Bytes(originalNote, Math.max(0, maxBytes - overhead));
     },
     () => {
       deathPlace = '';
@@ -782,37 +1100,14 @@ export function encodeRelationshipNote(
 
   const maxBytes = opts?.maxBytes ?? MEMORIAL_NOTE_MAX_BYTES_WITH_PARENT;
   let note = scrub(fields.note || '');
+  const code = wireRelationshipType(relType);
 
   const pack = (): string =>
-    joinAltarParts([
-      '',
-      '',
-      note,
-      '',
-      '',
-      '',
-      '',
-      '',
-      wireRelationshipType(relType),
-      relTxid,
-    ]);
+    note ? `${code}${ALTAR_SEP}${relTxid}${ALTAR_SEP}${note}` : `${code}${ALTAR_SEP}${relTxid}`;
 
   let packed = pack();
   if (utf8ByteLength(packed) > maxBytes && note) {
-    const overhead = utf8ByteLength(
-      joinAltarParts([
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        '',
-        wireRelationshipType(relType),
-        relTxid,
-      ]),
-    );
+    const overhead = utf8ByteLength(`${code}${ALTAR_SEP}${relTxid}${ALTAR_SEP}`);
     const noteBudget = Math.max(0, maxBytes - overhead);
     note = truncateUtf8Bytes(note, noteBudget);
     packed = pack();
@@ -835,7 +1130,8 @@ export function encodeRelationshipNote(
  * does not re-state name / birth / relationships.
  */
 export function encodeDeathDateNote(
-  fields: Pick<AltarFields, 'deathDate' | 'deathPlace' | 'funeralPlace'>,
+  fields: Pick<AltarFields, 'deathDate' | 'deathPlace' | 'funeralPlace'> &
+    Partial<Pick<AltarFields, 'dateCalendar'>>,
   opts?: EncodeAltarNoteOptions,
 ): string {
   const err = validateDeathDateFields(fields);
@@ -845,6 +1141,9 @@ export function encodeDeathDateNote(
   const deathDate = scrub(fields.deathDate);
   let deathPlace = scrub(fields.deathPlace);
   let funeralPlace = scrub(fields.funeralPlace);
+  const dateCalendar = wireAltarDateCalendar(
+    normalizeAltarDateCalendar(fields.dateCalendar),
+  );
 
   const pack = (): string =>
     joinAltarParts([
@@ -856,6 +1155,10 @@ export function encodeDeathDateNote(
       deathDate,
       deathPlace,
       funeralPlace,
+      '',
+      '',
+      '',
+      dateCalendar,
     ]);
 
   let packed = pack();

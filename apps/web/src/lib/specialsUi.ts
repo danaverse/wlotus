@@ -10,7 +10,16 @@ import {
 import {
   findCatalogEntryById,
   findCatalogEntryByName,
+  templeSpecialCatalog,
+  type TempleSpecialCatalogEntry,
 } from '../../../../src/params/templeSpecialCatalog.js';
+import {
+  altarBareNameFromNote,
+  altarHasDeathDate,
+  memorialDisplayName,
+  type AltarDateCalendar,
+  type AltarFields,
+} from './altarFields.js';
 
 /**
  * Temple specials UI helpers — kind-driven copy + story on details / soft pray.
@@ -75,6 +84,82 @@ export function findSpecialById(
 
 export function isBoundSpecialRoot(profileId: string | null | undefined): boolean {
   return /^[0-9a-f]{64}$/i.test((profileId ?? '').trim());
+}
+
+function catalogEntryToProfile(
+  e: TempleSpecialCatalogEntry,
+): TempleSpecialProfileUi {
+  return {
+    id: e.id,
+    profileId: '',
+    kind: e.kind,
+    name: e.name,
+    active: false,
+    eventDate: e.eventDate,
+    eventCalendar: e.eventCalendar,
+    eventRecurrence: e.eventRecurrence,
+    lunarMonthEnd: e.lunarMonthEnd,
+    birthDate: e.birthDate ?? null,
+    birthPlace: e.birthPlace || null,
+    storyTitle: e.story.title ?? null,
+    storyBody: e.story.body ?? null,
+    storyTitleEn: e.story.titleEn ?? null,
+    storyBodyEn: e.story.bodyEn ?? null,
+    storyTitleZh: e.story.titleZh ?? null,
+    storyBodyZh: e.story.bodyZh ?? null,
+    countries: e.countries,
+  };
+}
+
+/** Catalog rows as home-list profiles (unbound until an index name match). */
+export function catalogSpecialProfiles(
+  year = new Date().getFullYear(),
+): TempleSpecialProfileUi[] {
+  return templeSpecialCatalog(year).map(catalogEntryToProfile);
+}
+
+/**
+ * Bind catalog slugs to on-chain star roots by altar name.
+ * Used when `/api/status` is down (test mint-api stopped) so Upcoming
+ * can still list events and lotus counts from dana-index.
+ */
+export function bindSpecialsFromIndex(
+  profiles: TempleSpecialProfileUi[],
+  groups: Array<{ originalBurnTxid: string; originalNote: string }>,
+): TempleSpecialProfileUi[] {
+  const byId = new Map<string, string>();
+  for (const g of groups) {
+    const txid = g.originalBurnTxid.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(txid)) continue;
+    const labels = [
+      memorialDisplayName(g.originalNote),
+      altarBareNameFromNote(g.originalNote),
+      g.originalNote,
+    ];
+    for (const label of labels) {
+      const entry = findCatalogEntryByName(label);
+      if (!entry || byId.has(entry.id)) continue;
+      byId.set(entry.id, txid);
+      break;
+    }
+  }
+  return profiles.map(p => {
+    const id = (p.id || '').trim();
+    const bound = id ? byId.get(id) : undefined;
+    return bound ? { ...p, profileId: bound } : p;
+  });
+}
+
+export function catalogSpecialsStatus(
+  groups: Array<{ originalBurnTxid: string; originalNote: string }> = [],
+  year = new Date().getFullYear(),
+): TempleSpecialsStatusUi {
+  const profiles = bindSpecialsFromIndex(catalogSpecialProfiles(year), groups);
+  return {
+    enabled: profiles.length > 0,
+    profiles,
+    active: profiles.filter(p => p.active),
+  };
 }
 
 /**
@@ -202,6 +287,41 @@ export function specialHidesAltarSectionLabel(
   );
 }
 
+/**
+ * Flower re-offers: a packed death/event date, or any catalog temple special.
+ * Heroes such as Hồ Chí Minh are public memorials even when the viewer has
+ * no local Recent row (history prune no longer seeds viewed altars).
+ * Living personal profiles still need a death date.
+ */
+export function altarAllowsFlowerReoffer(
+  altar: Pick<AltarFields, 'deathDate'> | null | undefined,
+  special: TempleSpecialProfileUi | null | undefined,
+): boolean {
+  if (special) return true;
+  return altarHasDeathDate(altar);
+}
+
+/**
+ * Fill the death/event slot from the catalog when the packed note (or the
+ * name-only home-list fallback) omitted it. Prefers the solar effective day.
+ */
+export function overlaySpecialEventDate(
+  altar: AltarFields,
+  special: TempleSpecialProfileUi | null | undefined,
+): AltarFields {
+  if (altarHasDeathDate(altar) || !special) return altar;
+  const death = (
+    special.effectiveEventDate ||
+    special.eventDate ||
+    ''
+  ).trim();
+  if (!/^\d{4}(-\d{2}(-\d{2})?)?$/.test(death)) return altar;
+  const cal = (special.eventCalendar || '').toLowerCase();
+  const dateCalendar: AltarDateCalendar =
+    cal === 'lunar' || cal === 'solar' ? cal : altar.dateCalendar;
+  return { ...altar, deathDate: death, dateCalendar };
+}
+
 export interface RankedTempleSpecial extends TempleSpecialProfileUi {
   /**
    * Anchor day for display/debug: start when known, else peak/end.
@@ -209,22 +329,36 @@ export interface RankedTempleSpecial extends TempleSpecialProfileUi {
    */
   sortDate: string;
   /**
-   * Public or local offering count under this profile root.
+   * Public lotus-atom total under this profile root (not offering txs).
    * `null` = bound but index/local count not loaded yet (don’t treat as 0).
    */
   offerCount: number | null;
 }
 
+/** Home list tabs: temple specials vs all altars ranked by decayed offerings. */
+export type HomeEventsSort = 'upcoming' | 'trending';
+
+export const HOME_EVENTS_SORT_KEY = 'wlotus.homeEventsSort';
+
+export function parseHomeEventsSort(
+  raw: string | null | undefined,
+): HomeEventsSort {
+  return raw === 'trending' ? 'trending' : 'upcoming';
+}
+
 /**
- * Top specials for the home ranking list — what’s next / what’s now.
+ * Top specials for the home **Upcoming** list — what’s next / what’s now.
  * Past windows are omitted (forward-looking only).
+ *
+ * Home **Trending** is a separate dana-index list (all named altars,
+ * ranked by gravity-decayed offerings) — not this pool.
  *
  * Order:
  *   1. Happening now (active / in window) before upcoming
  *   2. Within a tier: closer in time first
  *        - upcoming → soonest start first
- *        - active   → most offerings first (same day competition, e.g. 15/7)
- *   3. Tie-break: offerCount desc, then name
+ *        - active   → most lotuses burned first (same day competition, e.g. 15/7)
+ *   3. Tie-break: lotus count desc, then name
  *
  * Example (before 2/7 lunar): Cô Hồn (starts sooner) above Vu Lan.
  * On 15/7 when both active: higher burn count on top.
@@ -544,7 +678,8 @@ export type SpecialCountdown =
  * Days from local today to the special window.
  * Uses effectiveStartDate when present (range events like Cô Hồn),
  * else effectiveEventDate / eventDate.
- * Inside [start, end] → ongoing; on start day before end → today if single day.
+ * Any civil day inside [start, end] is happening — including a one-day
+ * festival such as Vu Lan on rằm tháng Bảy.
  */
 export function specialCountdown(
   special: TempleSpecialProfileUi,
@@ -585,7 +720,5 @@ export function specialCountdown(
       days: Math.round((todayUtc - endMs) / 86_400_000),
     };
   }
-  // Inside window
-  if (startMs === endMs) return { kind: 'today' };
   return { kind: 'ongoing' };
 }

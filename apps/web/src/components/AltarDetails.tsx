@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from 'react';
 import {
-  altarHonorificLabel,
+  altarIsEvent,
   altarParentRelationshipLabel,
   altarRelationships,
   altarSpouseRelationshipLabel,
   formatAltarDateInput,
+  formatAltarPersonName,
   sortAltarRelationships,
   type AltarFields,
   type AltarHonorific,
@@ -69,18 +70,35 @@ export function AltarDetails(props: {
    * Users offer only; a personal altar for the same person is a separate flow.
    */
   specialKind?: AltarDetailsSpecialKind | null;
+  /**
+   * Re-offer sheet: hide the root Lời nguyện. New words go in the extra
+   * field and on-chain as DANA v2 extra text only (parent txid is the link).
+   */
+  hideNote?: boolean;
+  /** Creator-only: listed / unlisted on Ban thờ details. Never during offer. */
+  showListed?: boolean;
   onViewRelated?: (relatedTxid: string) => void;
   relatedAltarOptions?: RelatedAltarOption[];
 }) {
   const { locale, t } = useLocale();
-  const { altar, specialKind } = props;
+  const { altar, specialKind, hideNote } = props;
+  const nameLocale: AltarLocale = locale.startsWith('zh')
+    ? 'zh'
+    : locale.startsWith('en')
+      ? 'en'
+      : 'vi';
   const hideCatalogFields = Boolean(specialKind);
-  const honorific = altarHonorificLabel(altar.title, locale);
+  const userEvent = !hideCatalogFields && altarIsEvent(altar);
+  const hidePersonOnly = hideCatalogFields || userEvent;
+  const useEventDateLabel = hideCatalogFields || userEvent;
   const solarDeath = displayAltarDate(altar.deathDate);
   const lunarDeathDate = formatLunarDeathDate(altar.deathDate.trim(), locale);
-  const [showLunarDeath, setShowLunarDeath] = useState(() =>
-    Boolean(lunarDeathDate),
-  );
+  const [showLunarDeath, setShowLunarDeath] = useState(() => {
+    if (!lunarDeathDate) return false;
+    if (altar.dateCalendar === 'solar') return false;
+    if (altar.dateCalendar === 'lunar') return true;
+    return true;
+  });
   const deathValue =
     showLunarDeath && lunarDeathDate ? lunarDeathDate : solarDeath;
   const canToggleDeath = Boolean(lunarDeathDate && solarDeath);
@@ -99,29 +117,28 @@ export function AltarDetails(props: {
       onClick={() => setShowLunarDeath(v => !v)}
     >
       {showLunarDeath
-        ? hideCatalogFields
+        ? useEventDateLabel
           ? t('altarEventDateLunar')
           : t('altarDeathDateLunar')
-        : hideCatalogFields
+        : useEventDateLabel
           ? t('altarEventDateSolar')
           : t('altarDeathDateSolar')}
     </button>
-  ) : hideCatalogFields ? (
+  ) : useEventDateLabel ? (
     t('altarEventDate')
   ) : (
     t('altarDeathDate')
   );
 
-  const nameText = hideCatalogFields ? '' : altar.name.trim();
+  const nameText = hideCatalogFields
+    ? ''
+    : formatAltarPersonName(altar, nameLocale);
 
   const rows: { key: string; label: ReactNode; value: ReactNode }[] = [
-    ...(hideCatalogFields
-      ? []
-      : [{ key: 'honorific', label: t('altarHonorific'), value: honorific }]),
-    ...(hideCatalogFields
+    ...(hideCatalogFields || hideNote
       ? []
       : [{ key: 'note', label: t('altarNote'), value: altar.note.trim() }]),
-    ...(hideCatalogFields
+    ...(hidePersonOnly
       ? []
       : [
           {
@@ -130,15 +147,17 @@ export function AltarDetails(props: {
             value: altar.birthPlace.trim(),
           },
         ]),
-    ...(hideCatalogFields
+    ...(hidePersonOnly
       ? []
       : [{ key: 'birthDate', label: t('altarBirthDate'), value: birthValue }]),
-    ...(hideCatalogFields
+    ...(hidePersonOnly && !userEvent
       ? []
       : [
           {
             key: 'deathPlace',
-            label: t('altarDeathPlace'),
+            label: userEvent
+              ? t('altarEventLocation')
+              : t('altarDeathPlace'),
             value: altar.deathPlace.trim(),
           },
         ]),
@@ -151,13 +170,23 @@ export function AltarDetails(props: {
             value: deathValue,
           },
         ]),
-    ...(hideCatalogFields
+    ...(hidePersonOnly
       ? []
       : [
           {
             key: 'funeralPlace',
             label: t('altarFuneralPlace'),
             value: altar.funeralPlace.trim(),
+          },
+        ]),
+    ...(hidePersonOnly || !props.showListed
+      ? []
+      : [
+          {
+            key: 'listed',
+            label: t('altarListedLabel'),
+            value:
+              altar.listed === true ? t('altarListedYes') : t('altarListedNo'),
           },
         ]),
   ].filter(r => {

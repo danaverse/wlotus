@@ -17,6 +17,8 @@ import { LunarCalendar } from './components/LunarCalendar.js';
 import { SearchOverlay } from './components/SearchOverlay.js';
 import { SwipeReveal } from './components/SwipeReveal.js';
 import { TabBar } from './components/TabBar.js';
+import { OfferModal } from './components/OfferModal.js';
+import { OfferPushOptIn } from './components/OfferPushOptIn.js';
 import {
   formatActualDurationLocale,
   formatElapsedTenthsMinLocale,
@@ -25,28 +27,36 @@ import {
 } from './i18n/format.js';
 import { useLocale } from './i18n/LocaleContext.js';
 import { applyDocumentTheme, documentTheme } from './i18n/appearance.js';
+import { setOfferingBlocksPwaReload } from './lib/pwaReloadGate.js';
 import {
   getMinPrayMs,
   getOrCreateInstallId,
   LOCAL_OFFERS_KEY,
   PRAYER_TICKER,
+  PRAYER_TOKEN_ID,
   TIP_POLL_MS,
 } from './lib/config.js';
 import {
   emptyAltarFields,
   encodeAltarNote,
   encodeDeathDateNote,
+  encodeListNote,
   encodeRelationshipNote,
   formatAltarPersonName,
   isAltarPackedNote,
   memorialDisplayName,
   memorialNoteMaxBytes,
+  MEMORIAL_NOTE_MAX_BYTES_WITH_PARENT,
   mergeAltarFields,
   altarHasDeathDate,
+  altarIsEvent,
   altarRelationships,
   normalizeAltarRelatedTxid,
   normalizeAltarRelationshipType,
   parseAltarNote,
+  prepareDanaNote,
+  truncateUtf8Bytes,
+  utf8ByteLength,
   type AltarFields,
   type AltarRelationshipType,
 } from './lib/altarFields.js';
@@ -69,18 +79,22 @@ import { mineInWorker } from './lib/mineRunner.js';
 import { MineElapsedClock } from './lib/mineElapsedClock.js';
 import { waitMinPray } from './lib/minPraySeconds.js';
 import {
+  calendarMemorialFromAltar,
   calendarYmdFromHash,
   hashForCalendar,
   tabFromHash,
   todayYmd,
   type AppTab,
 } from './lib/calendarMonth.js';
+import { showAppTabBar } from './lib/showTabBar.js';
 import {
   findSpecialForParent,
   findSpecialById,
   specialOfferButtonKind,
   specialSessionTitle,
   specialHidesAltarSectionLabel,
+  altarAllowsFlowerReoffer,
+  overlaySpecialEventDate,
   rankTempleSpecials,
   formatSpecialEventDateLabel,
   formatSpecialListName,
@@ -88,6 +102,10 @@ import {
   filterSpecialsForViewer,
   isBoundSpecialRoot,
   homeEventOfferHint,
+  HOME_EVENTS_SORT_KEY,
+  catalogSpecialsStatus,
+  parseHomeEventsSort,
+  type HomeEventsSort,
   type TempleSpecialsStatusUi,
   type TempleSpecialProfileUi,
 } from './lib/specialsUi.js';
@@ -103,9 +121,25 @@ import {
   type OfferGroup,
 } from './lib/groupOffers.js';
 import {
+  groupOfferedInPastYear,
+  pruneUnownedAndExpiredOffers,
+  remindAltarsFromOffers,
+  rootHasRecentOwnOffer,
+} from './lib/ownOffers.js';
+import {
+  syncMorningReminders,
+} from './lib/pushReminders.js';
+import {
+  altarFieldsFromIndexMemorial,
   fetchIndexMemorial,
+  fetchIndexMemorialOrNull,
+  fetchIndexRecent,
+  fetchIndexTrending,
+  groupLotusCount,
+  indexMemorialNotes,
   searchIndexMemorials,
   type IndexMemorialGroup,
+  type IndexTrendingGroup,
 } from './lib/danaIndexApi.js';
 import {
   mergeSearchResults,
@@ -121,7 +155,15 @@ import {
   unhideRecentRoot,
 } from './lib/hiddenRecent.js';
 import { mergeIndexAndLocalOffers, syncIndexMemorialIntoLocal } from './lib/mergeRecentOffers.js';
+import { reconcileLocalOffersWithIndex } from './lib/reconcileRecentOffers.js';
 import { explorerTx } from './lib/explorer.js';
+import {
+  ACTIVE_CHALLENGE_KEY,
+  offersForLiveToken,
+  readStoredLiveTokenId,
+  stampOffersForLiveToken,
+  syncLocalHistoryToLiveToken,
+} from './lib/tokenEra.js';
 import {
   burnTxidFromLocation,
   clearDedicationPath,
@@ -143,18 +185,44 @@ type Msg =
 
 type Phase = 'idle' | 'challenge' | 'mining' | 'submit' | 'holding' | 'burn';
 
-const ACTIVE_CHALLENGE_KEY = 'wlotus.activeChallenge';
-
 interface StoredChallenge {
   challengeId: string;
   installId: string;
 }
 
-function loadOffers(): LocalOffer[] {
+function liveTokenForLocalOffers(): string {
+  return readStoredLiveTokenId() || PRAYER_TOKEN_ID.trim().toLowerCase();
+}
+
+function readStoredOffers(): LocalOffer[] {
   try {
     const raw = localStorage.getItem(LOCAL_OFFERS_KEY);
     if (!raw) return [];
-    return JSON.parse(raw) as LocalOffer[];
+    const parsed = JSON.parse(raw) as LocalOffer[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistOffers(next: LocalOffer[]): LocalOffer[] {
+  try {
+    localStorage.setItem(LOCAL_OFFERS_KEY, JSON.stringify(next));
+  } catch {
+    /* ignore quota / private mode */
+  }
+  return next;
+}
+
+function loadOffers(): LocalOffer[] {
+  try {
+    const parsed = readStoredOffers();
+    const pruned = offersForLiveToken(
+      pruneUnownedAndExpiredOffers(parsed),
+      liveTokenForLocalOffers(),
+    );
+    if (pruned.length !== parsed.length) persistOffers(pruned);
+    return pruned;
   } catch {
     return [];
   }
@@ -212,10 +280,23 @@ function ExplorerLinkIcon({
 }
 
 
-function pushOffer(o: LocalOffer): LocalOffer[] {
-  const next = [o, ...loadOffers()].slice(0, 40);
-  localStorage.setItem(LOCAL_OFFERS_KEY, JSON.stringify(next));
-  return next;
+function pushOffer(o: LocalOffer, liveTokenId?: string | null): LocalOffer[] {
+  const live =
+    (liveTokenId || '').trim().toLowerCase() || liveTokenForLocalOffers();
+  const id = o.burnTxid.trim().toLowerCase();
+  const stamped: LocalOffer = {
+    ...o,
+    burnTxid: id || o.burnTxid,
+    tokenId: o.tokenId || live,
+  };
+  const current = loadOffers().filter(
+    x => x.burnTxid.trim().toLowerCase() !== stamped.burnTxid,
+  );
+  const next = stampOffersForLiveToken([stamped, ...current], live).slice(
+    0,
+    80,
+  );
+  return persistOffers(next);
 }
 
 function rememberChallenge(c: StoredChallenge): void {
@@ -252,6 +333,13 @@ export default function App() {
   /** Structured altar fields; packed into the on-chain note when offering. */
   const [altar, setAltar] = useState<AltarFields | null>(null);
   const [altarOpen, setAltarOpen] = useState(false);
+  const [homeEventsSort, setHomeEventsSort] = useState<HomeEventsSort>(() => {
+    try {
+      return parseHomeEventsSort(localStorage.getItem(HOME_EVENTS_SORT_KEY));
+    } catch {
+      return 'upcoming';
+    }
+  });
   /** Read-only Ban thờ sheet (Recent name / Dâng lại) — same screen. */
   const [dedicationSheet, setDedicationSheet] = useState<{
     parentBurnTxid: string;
@@ -265,13 +353,13 @@ export default function App() {
     isCreator: boolean;
   } | null>(null);
   /**
-   * Edit sheet for an EXISTING altar — relationship or death-date star
-   * fragment under the same root. Open for now; see docs/ALTAR.md.
+   * Edit sheet for an EXISTING altar — relationship, death-date, or
+   * list/unlist star fragment under the same root. See docs/ALTAR.md.
    */
   const [amendSheet, setAmendSheet] = useState<{
     parentBurnTxid: string;
     altar: AltarFields;
-    kind: 'relationship' | 'death';
+    kind: 'relationship' | 'death' | 'list';
   } | null>(null);
   /** rootBurnTxid → this installId is soft creator (API + local cache). */
   const [creatorByRoot, setCreatorByRoot] = useState<Map<string, boolean>>(
@@ -285,6 +373,10 @@ export default function App() {
   const [specialOfferCounts, setSpecialOfferCounts] = useState<
     Record<string, number>
   >({});
+  const [indexTrending, setIndexTrending] = useState<IndexTrendingGroup[]>(
+    [],
+  );
+  const [indexTrendingLoading, setIndexTrendingLoading] = useState(false);
   const [maxOffersPerDay, setMaxOffersPerDay] = useState(20);
   const [tokenId, setTokenId] = useState<string | null>(null);
   const [ticker, setTicker] = useState(PRAYER_TICKER);
@@ -409,6 +501,10 @@ export default function App() {
   }, [locale, appearance, busy]);
 
   useEffect(() => {
+    setOfferingBlocksPwaReload(busy);
+  }, [busy]);
+
+  useEffect(() => {
     const sync = () => {
       const hash = window.location.hash;
       setTab(tabFromHash(hash));
@@ -488,15 +584,64 @@ export default function App() {
     } catch {
       setApiOnline(false);
       setRemaining(null);
-      setTempleSpecials(null);
+      // Upcoming is catalog+windows, not mint-api. Test often has mint-api
+      // stopped so two desks do not race the live felt batons.
+      try {
+        const recent = await fetchIndexRecent(200);
+        setTempleSpecials(catalogSpecialsStatus(recent));
+      } catch {
+        setTempleSpecials(catalogSpecialsStatus());
+      }
     }
   }, [installId]);
+
+  useEffect(() => {
+    if (!tokenId) return;
+    const wiped = syncLocalHistoryToLiveToken(tokenId);
+    if (wiped) {
+      setOffers([]);
+      setHiddenRecent(new Set());
+      setCreatorByRoot(new Map());
+      clearRememberedChallenge();
+      return;
+    }
+    setOffers(loadOffers());
+    let cancelled = false;
+    void (async () => {
+      try {
+        const next = await reconcileLocalOffersWithIndex(readStoredOffers(), {
+          liveTokenId: tokenId,
+          fetchMemorial: fetchIndexMemorialOrNull,
+        });
+        if (cancelled) return;
+        persistOffers(next);
+        setOffers(next);
+      } catch {
+        if (!cancelled) setOffers(loadOffers());
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tokenId]);
 
   useEffect(() => {
     void refreshStatus();
     const timer = setInterval(() => void refreshStatus(), 15_000);
     return () => clearInterval(timer);
   }, [refreshStatus]);
+
+  useEffect(() => {
+    if (typeof Notification === 'undefined') return;
+    if (Notification.permission !== 'granted') return;
+    void syncMorningReminders({
+      installId,
+      locale,
+      altars: remindAltarsFromOffers(offers, locale, hiddenRecent),
+    }).catch(() => {
+      /* mint-api offline */
+    });
+  }, [installId, locale, offers, hiddenRecent]);
 
   /** Probe once if we have no cached rate; otherwise reuse localStorage. */
   useEffect(() => {
@@ -710,9 +855,10 @@ export default function App() {
     extraNote?: string;
     /**
      * Star-fragment under an existing altar (parent = root).
-     * `relationship` = link only; `death` = death date for a living profile.
+     * `relationship` = link only; `death` = death date for a living profile;
+     * `list` = Trending list / unlist.
      */
-    amend?: boolean | 'relationship' | 'death';
+    amend?: boolean | 'relationship' | 'death' | 'list';
     /** Related-altar meta for session AltarDetails (names + honorifics). */
     relatedOptions?: RelatedAltarOption[];
     /** Unbound temple special id (first burn). */
@@ -722,7 +868,9 @@ export default function App() {
     const amendKind =
       opts?.amend === true
         ? 'relationship'
-        : opts?.amend === 'relationship' || opts?.amend === 'death'
+        : opts?.amend === 'relationship' ||
+            opts?.amend === 'death' ||
+            opts?.amend === 'list'
           ? opts.amend
           : null;
     const isAmend = Boolean(parentBurnTxid) && Boolean(amendKind);
@@ -744,19 +892,28 @@ export default function App() {
           text:
             amendKind === 'death'
               ? t('firstOfferDeathHint')
-              : t('amendRelationshipCreatorOnly'),
+              : amendKind === 'list'
+                ? t('amendListCreatorOnly')
+                : t('amendRelationshipCreatorOnly'),
         });
         return;
       }
     }
 
     if (isReoffer) {
-      if (opts?.altar && !altarHasDeathDate(opts.altar)) {
+      if (
+        opts?.altar &&
+        !altarAllowsFlowerReoffer(
+          opts.altar,
+          specialForBurn(parentBurnTxid, opts.specialId),
+        )
+      ) {
         setMsg({ kind: 'err', text: t('firstOfferDeathHint') });
         return;
       }
       // Re-offer: parent txid only + optional extra memorial message.
-      challengeNote = extraNote ?? '';
+      // Never re-pack the root altar (name / places / dates stay on ★).
+      challengeNote = prepareDanaNote(extraNote ?? '', true);
       historyNote = (opts?.displayNote ?? '').trim();
     } else if (isAmend && amendKind === 'death' && activeAltar) {
       try {
@@ -765,6 +922,7 @@ export default function App() {
             deathDate: activeAltar.deathDate,
             deathPlace: activeAltar.deathPlace,
             funeralPlace: activeAltar.funeralPlace,
+            dateCalendar: activeAltar.dateCalendar,
           },
           { maxBytes: memorialNoteMaxBytes(true) },
         );
@@ -772,6 +930,12 @@ export default function App() {
         setMsg({ kind: 'err', text: t('altarErrDeathDate') });
         return;
       }
+      historyNote =
+        formatAltarPersonName(activeAltar, locale) ||
+        (opts?.displayNote ?? '').trim() ||
+        t('offeringFallback');
+    } else if (isAmend && amendKind === 'list' && activeAltar) {
+      challengeNote = encodeListNote(activeAltar.listed === true);
       historyNote =
         formatAltarPersonName(activeAltar, locale) ||
         (opts?.displayNote ?? '').trim() ||
@@ -1115,6 +1279,7 @@ export default function App() {
             hashrateHps: result.hashrateHps || mined.hashrateHps,
             bits: result.bits,
             parentBurnTxid,
+            own: true,
           };
           // Share-link re-offer: original may not be on this device — seed a
           // named root (prefer packed Ban thờ wire) so Recent can open full details.
@@ -1128,16 +1293,17 @@ export default function App() {
                 /* keep historyNote */
               }
             }
+            if (!rootNote) rootNote = challengeNote.trim();
             if (rootNote) {
               const seeded = seedLocalRootIfMissing(
                 loadOffers(),
                 parentBurnTxid,
                 rootNote,
               );
-              localStorage.setItem(LOCAL_OFFERS_KEY, JSON.stringify(seeded));
+              persistOffers(seeded);
             }
           }
-          setOffers(pushOffer(saved));
+          setOffers(pushOffer(saved, tokenId));
           // Offering again restores a previously hidden dedication on this device.
           setHiddenRecent(prev =>
             unhideRecentRoot(resolveOriginalTxid(saved), prev),
@@ -1156,7 +1322,10 @@ export default function App() {
                 parentBurnTxid: burnTxid,
               };
             }
-          } else if (isAmend && amendKind === 'relationship') {
+          } else if (
+            isAmend &&
+            (amendKind === 'relationship' || amendKind === 'list')
+          ) {
             pendingRelationshipFollowUpRef.current = null;
             // Open profile/Ban thờ from local burns so the new link shows
             // immediately (dana-index may lag by minutes).
@@ -1228,7 +1397,14 @@ export default function App() {
           if (e instanceof DOMException && e.name === 'AbortError') {
             return;
           }
-          setMsg({ kind: 'err', text: errMsg });
+          setMsg({
+            kind: 'err',
+            text:
+              errMsg.includes('OP_RETURN of') ||
+              errMsg.includes('OP_RETURN budget')
+                ? tRef.current('altarErrOpreturn')
+                : errMsg,
+          });
           if (!pendingRelationshipFollowUpRef.current?.parentBurnTxid) {
             pendingRelationshipFollowUpRef.current = null;
           }
@@ -1266,14 +1442,14 @@ export default function App() {
   }
 
   useEffect(() => {
-    const lock = Boolean(
-      busy ||
-        dedicationSheet ||
-        historyGroup ||
-        altarOpen ||
-        amendSheet ||
-        searchOpen,
-    );
+    const lock = !showAppTabBar({
+      busy,
+      dedicationSheet,
+      historyGroup,
+      altarOpen,
+      amendSheet,
+      searchOpen,
+    });
     document.body.style.overflow = lock ? 'hidden' : '';
     return () => {
       document.body.style.overflow = '';
@@ -1310,8 +1486,19 @@ export default function App() {
 
   /** Persist index burns for a dedication so Recent total matches History. */
   function persistMemorialSync(remote: IndexMemorialGroup): LocalOffer[] {
-    const next = syncIndexMemorialIntoLocal(loadOffers(), remote);
-    localStorage.setItem(LOCAL_OFFERS_KEY, JSON.stringify(next));
+    const current = loadOffers();
+    // Viewing / search must not create a Recent row — only altars this
+    // device offered in the past year stay in history.
+    if (!rootHasRecentOwnOffer(current, remote.originalBurnTxid)) {
+      return current;
+    }
+    const next = stampOffersForLiveToken(
+      pruneUnownedAndExpiredOffers(
+        syncIndexMemorialIntoLocal(current, remote),
+      ),
+      liveTokenForLocalOffers(),
+    );
+    persistOffers(next);
     setOffers(next);
     return next;
   }
@@ -1324,16 +1511,7 @@ export default function App() {
   function pickDisplayAltarFields(
     remote: IndexMemorialGroup,
   ): AltarFields | null {
-    const notes: string[] = [];
-    for (const b of remote.burns) {
-      const n = (b.note || '').trim();
-      if (n) notes.push(n);
-    }
-    const original = (remote.originalNote || '').trim();
-    if (original) notes.push(original);
-    const latest = (remote.latestNote || '').trim();
-    if (latest) notes.push(latest);
-    return mergeAltarFields(notes);
+    return altarFieldsFromIndexMemorial(remote);
   }
 
   function pickDisplayAltarNote(remote: IndexMemorialGroup): string {
@@ -1395,7 +1573,10 @@ export default function App() {
 
     // Show device burns immediately (relationship fragments are local before
     // dana-index catches up — often minutes later).
-    let resolved = resolveLocal(memorialNote);
+    let resolved = overlaySpecialEventDate(
+      resolveLocal(memorialNote),
+      specialForBurn(opts.parentBurnTxid),
+    );
     let isCreator =
       isLocalCreatedRoot(rootId) || creatorByRoot.get(rootId) === true;
     setDedicationSheet({
@@ -1408,10 +1589,18 @@ export default function App() {
 
     try {
       const remote = await fetchIndexMemorial(opts.parentBurnTxid);
-      // Union into localStorage — keeps device-only relationship / death
-      // fragments that the index has not indexed yet.
+      // Own offerings stay in Recent; viewing must still hydrate Ban thờ
+      // from the index (prune no longer seeds a row for guests).
       persistMemorialSync(remote);
-      resolved = resolveLocal(memorialNote);
+      const localNotes = (localGroup()?.burns ?? [])
+        .map(b => (b.note || '').trim())
+        .filter(Boolean);
+      resolved = overlaySpecialEventDate(
+        mergeAltarFields([...localNotes, ...indexMemorialNotes(remote)]) ??
+          altarFieldsFromIndexMemorial(remote) ??
+          resolveLocal(pickDisplayAltarNote(remote) || memorialNote),
+        specialForBurn(opts.parentBurnTxid),
+      );
     } catch {
       // Test / offline index: still hydrate full Ban thờ from chain.
       try {
@@ -1425,6 +1614,10 @@ export default function App() {
       } catch {
         /* keep local */
       }
+      resolved = overlaySpecialEventDate(
+        resolved,
+        specialForBurn(opts.parentBurnTxid),
+      );
     }
 
     const relatedOptions = await resolveRelatedOptions(
@@ -1509,7 +1702,7 @@ export default function App() {
   }
 
   /** Device-local Recent only — dana-index is for History / share lookup. */
-  // Offering counts for temple specials (home top-5 ranking).
+  // Lotus atoms for temple specials (home events flower count).
   useEffect(() => {
     const profiles = templeSpecials?.profiles ?? [];
     if (profiles.length === 0) {
@@ -1533,12 +1726,8 @@ export default function App() {
           let n = localByRoot.get(id) ?? 0;
           try {
             const remote = await fetchIndexMemorial(p.profileId);
-            if (
-              typeof remote.totalBurns === 'number' &&
-              remote.totalBurns > n
-            ) {
-              n = remote.totalBurns;
-            }
+            const lotus = groupLotusCount(remote);
+            if (lotus > n) n = lotus;
             next[id] = Math.max(n, 1);
           } catch {
             if (n > 0) next[id] = n;
@@ -1562,6 +1751,34 @@ export default function App() {
     new Date(),
     locale,
   );
+
+  useEffect(() => {
+    if (homeEventsSort !== 'trending') return;
+    let cancelled = false;
+    setIndexTrendingLoading(true);
+    void (async () => {
+      try {
+        const items = await fetchIndexTrending(8);
+        if (!cancelled) setIndexTrending(items);
+      } catch {
+        if (!cancelled) setIndexTrending([]);
+      } finally {
+        if (!cancelled) setIndexTrendingLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [homeEventsSort]);
+
+  function persistHomeEventsSort(next: HomeEventsSort) {
+    setHomeEventsSort(next);
+    try {
+      localStorage.setItem(HOME_EVENTS_SORT_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  }
 
   function altarFromUnboundSpecial(sp: TempleSpecialProfileUi): AltarFields {
     return {
@@ -1597,6 +1814,17 @@ export default function App() {
     );
   }
 
+  function flowerReofferOk(
+    fields: AltarFields | null | undefined,
+    parentBurnTxid?: string | null,
+    specialId?: string | null,
+  ): boolean {
+    return altarAllowsFlowerReoffer(
+      fields,
+      specialForBurn(parentBurnTxid, specialId),
+    );
+  }
+
   function openHomeEvent(ev: TempleSpecialProfileUi) {
     if (isBoundSpecialRoot(ev.profileId)) {
       void openDedicationSheet({
@@ -1609,7 +1837,9 @@ export default function App() {
   }
 
   const recentGroups = groupOffersByOriginal(offers).filter(
-    g => !isRecentRootHidden(g.original.burnTxid, hiddenRecent),
+    g =>
+      groupOfferedInPastYear(g) &&
+      !isRecentRootHidden(g.original.burnTxid, hiddenRecent),
   );
 
   const calendarSpecials = filterSpecialsForViewer(templeSpecials?.profiles, {
@@ -1618,19 +1848,16 @@ export default function App() {
   });
   const calendarMemorials = recentGroups.flatMap(g => {
     const a = altarFromOfferGroup(g);
-    const deathYmd = (a.deathDate || '').trim();
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(deathYmd)) return [];
     const name =
       memorialDisplayName(g.note, locale) ||
       a.name ||
       t('offeringFallback');
-    return [
-      {
-        name,
-        deathYmd,
-        parentTxid: g.original.burnTxid,
-      },
-    ];
+    const row = calendarMemorialFromAltar(
+      name,
+      a.deathDate,
+      g.original.burnTxid,
+    );
+    return row ? [row] : [];
   });
 
   // Soft-ownership prefetch for living profiles in Recent (creator sees Dâng hoa).
@@ -1829,7 +2056,7 @@ export default function App() {
     const root = g.original.burnTxid;
     setHiddenRecent(prev => hideRecentRoot(root, prev));
     const nextOffers = stripOffersForRoot(loadOffers(), root);
-    localStorage.setItem(LOCAL_OFFERS_KEY, JSON.stringify(nextOffers));
+    persistOffers(nextOffers);
     setOffers(nextOffers);
     setSwipeOpenRoot(null);
     if (historyGroup?.original.burnTxid === root) setHistoryGroup(null);
@@ -1906,7 +2133,14 @@ export default function App() {
     );
   }
 
-  const showTabs = !(busy && session);
+  const showTabs = showAppTabBar({
+    busy,
+    dedicationSheet,
+    historyGroup,
+    altarOpen,
+    amendSheet,
+    searchOpen,
+  });
 
   return (
     <div className={`app${showTabs ? ' app--has-tabs' : ''}`}>
@@ -1943,6 +2177,7 @@ export default function App() {
             <LangSwitch />
           </div>
         </div>
+        <p className="headline">{t('headline')}</p>
         <p className="tagline">{t('tagline')}</p>
       </header>
 
@@ -2049,9 +2284,84 @@ export default function App() {
           )}
         </div>
 
-        {rankedHomeEvents.length > 0 ? (
-          <div className="home-events" aria-label={t('homeEventsTitle')}>
-            <h3 className="home-events-title">{t('homeEventsTitle')}</h3>
+        <div className="home-events" aria-label={t('homeEventsTitle')}>
+            <div
+              className="home-events-heading"
+              role="tablist"
+              aria-label={t('homeEventsTitle')}
+            >
+                <button
+                  type="button"
+                  role="tab"
+                  className="home-events-tab"
+                  aria-selected={homeEventsSort === 'upcoming'}
+                  onClick={() => persistHomeEventsSort('upcoming')}
+                >
+                  {t('homeEventsUpcoming')}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  className="home-events-tab"
+                  aria-selected={homeEventsSort === 'trending'}
+                  onClick={() => persistHomeEventsSort('trending')}
+                >
+                  {t('homeEventsTrending')}
+                </button>
+            </div>
+            {homeEventsSort === 'trending' ? (
+              indexTrendingLoading && indexTrending.length === 0 ? (
+                <p className="home-events-empty">{t('homeEventsLoadingTrending')}</p>
+              ) : indexTrending.length === 0 ? (
+                <p className="home-events-empty">{t('homeEventsEmptyTrending')}</p>
+              ) : (
+                <ul className="home-events-list">
+                  {indexTrending.map((g, idx) => {
+                    const name =
+                      memorialDisplayName(g.originalNote, locale) ||
+                      g.originalNote.trim() ||
+                      g.originalBurnTxid.slice(0, 8);
+                    const lotus = groupLotusCount(g);
+                    return (
+                      <li
+                        key={g.originalBurnTxid}
+                        className="home-events-item"
+                      >
+                        <button
+                          type="button"
+                          className="home-events-btn"
+                          disabled={busy || apiOnline === false}
+                          onClick={() => {
+                            void openDedicationSheet({
+                              parentBurnTxid: g.originalBurnTxid,
+                              memorialNote: g.originalNote,
+                            });
+                          }}
+                        >
+                          <span className="home-events-rank">{idx + 1}</span>
+                          <span className="home-events-main">
+                            <span className="home-events-name">{name}</span>
+                          </span>
+                          <span
+                            className="home-events-count home-events-count--offers"
+                            aria-label={t('homeEventsLotuses', {
+                              n: lotus,
+                            })}
+                          >
+                            <span className="home-events-count-n">
+                              {lotus}
+                            </span>
+                            <BrandMark badge width={24} height={24} />
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )
+            ) : rankedHomeEvents.length === 0 ? (
+              <p className="home-events-empty">{t('homeEventsEmptyUpcoming')}</p>
+            ) : (
             <ul className="home-events-list">
               {rankedHomeEvents.map((ev, idx) => {
                 const hint = homeEventOfferHint(ev.profileId, ev.offerCount);
@@ -2073,7 +2383,7 @@ export default function App() {
                       </span>
                       {(() => {
                         const cd = specialCountdown(ev);
-                        // Active window: only status (“happening” / today)
+                        // In-window festivals (one day or many) share one status.
                         if (cd.kind === 'ongoing') {
                           return (
                             <span className="home-events-date">
@@ -2116,7 +2426,7 @@ export default function App() {
                       }
                       aria-label={
                         hint === 'count'
-                          ? t('homeEventsOfferings', { n: ev.offerCount ?? 0 })
+                          ? t('homeEventsLotuses', { n: ev.offerCount ?? 0 })
                           : undefined
                       }
                     >
@@ -2136,8 +2446,8 @@ export default function App() {
                 );
               })}
             </ul>
+            )}
           </div>
-        ) : null}
 
         {altar ? (
           <div className="offer-actions">
@@ -2281,7 +2591,7 @@ export default function App() {
               const lastWhen = new Date(last.at).toLocaleString(locale);
               const rootId = g.original.burnTxid;
               const groupAltar = altarFromOfferGroup(g);
-              const canReoffer = altarHasDeathDate(groupAltar);
+              const canReoffer = flowerReofferOk(groupAltar, rootId);
               const rootKey = rootId.trim().toLowerCase();
               const isCreator =
                 creatorByRoot.get(rootKey) === true ||
@@ -2475,26 +2785,67 @@ export default function App() {
       ) : null}
 
       {dedicationSheet && !busy ? (
-        <div
+        <OfferModal
           className="offer-modal offer-modal--fill"
           role="dialog"
           aria-modal="true"
           aria-labelledby="altar-detail-title"
         >
           <div className="offer-modal-card altar-setup-card altar-detail-card">
-            <button
-              type="button"
-              className="offer-modal-close"
-              aria-label={t('btnClose')}
-              onClick={() => {
-                if (!dedicationSheet.parentBurnTxid) {
-                  pendingSpecialIdRef.current = null;
-                }
-                setDedicationSheet(null);
-              }}
-            >
-              ×
-            </button>
+            <div className="offer-modal-header-actions">
+              {dedicationSheet.parentBurnTxid ? (
+                <button
+                  type="button"
+                  className="offer-modal-share"
+                  aria-label={t('btnShare')}
+                  title={t('btnShare')}
+                  onClick={() => {
+                    const sp = specialForBurn(
+                      dedicationSheet.parentBurnTxid,
+                      dedicationSheet.specialId,
+                    );
+                    const label =
+                      (sp?.name || '').trim() ||
+                      formatAltarPersonName(
+                        dedicationSheet.altar,
+                        locale,
+                      ) ||
+                      t('offeringFallback');
+                    void shareDedication(
+                      dedicationSheet.parentBurnTxid,
+                      label,
+                    );
+                  }}
+                >
+                  <svg
+                    className="btn-icon-svg"
+                    viewBox="0 0 24 24"
+                    width="18"
+                    height="18"
+                    aria-hidden="true"
+                    focusable="false"
+                  >
+                    <path
+                      fill="currentColor"
+                      d="M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92s2.92-1.31 2.92-2.92-1.31-2.92-2.92-2.92z"
+                    />
+                  </svg>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="offer-modal-close"
+                aria-label={t('btnClose')}
+                onClick={() => {
+                  if (!dedicationSheet.parentBurnTxid) {
+                    pendingSpecialIdRef.current = null;
+                  }
+                  setDedicationSheet(null);
+                }}
+              >
+                ×
+              </button>
+            </div>
             <h2 id="altar-detail-title">
               {(() => {
                 const sp = specialForBurn(
@@ -2533,34 +2884,52 @@ export default function App() {
                   dedicationSheet.specialId,
                 )?.kind ?? null
               }
+              hideNote
+              showListed={dedicationSheet.isCreator}
               onViewRelated={txid => void viewRelatedAltar(txid)}
               relatedAltarOptions={dedicationSheet.relatedOptions}
             />
             ) : null}
-            {altarHasDeathDate(dedicationSheet.altar) ||
-            !dedicationSheet.parentBurnTxid ? (
+            {flowerReofferOk(
+              dedicationSheet.altar,
+              dedicationSheet.parentBurnTxid,
+              dedicationSheet.specialId,
+            ) || !dedicationSheet.parentBurnTxid ? (
                 <div className="field dedication-extra-note-field">
-                  <label htmlFor="dedication-extra-note">
-                    {(() => {
-                      const sp = specialForBurn(
-                        dedicationSheet.parentBurnTxid,
-                        dedicationSheet.specialId,
-                      );
-                      if (sp) {
-                        return t('specialPrayerNoteLabel');
-                      }
-                      return t('reofferExtraNoteLabel');
-                    })()}
-                  </label>
+                  <div className="field-label-row">
+                    <label htmlFor="dedication-extra-note">
+                      {(() => {
+                        const sp = specialForBurn(
+                          dedicationSheet.parentBurnTxid,
+                          dedicationSheet.specialId,
+                        );
+                        if (sp) {
+                          return t('specialPrayerNoteLabel');
+                        }
+                        return t('reofferExtraNoteLabel');
+                      })()}
+                    </label>
+                    <span className="field-label-budget">
+                      {t('altarNoteBudget', {
+                        used: utf8ByteLength(dedicationSheet.extraNote),
+                        max: MEMORIAL_NOTE_MAX_BYTES_WITH_PARENT,
+                      })}
+                    </span>
+                  </div>
                   <textarea
                     id="dedication-extra-note"
                     rows={2}
-                    maxLength={80}
                     value={dedicationSheet.extraNote}
                     onChange={e =>
                       setDedicationSheet(d =>
                         d
-                          ? { ...d, extraNote: e.target.value.slice(0, 80) }
+                          ? {
+                              ...d,
+                              extraNote: truncateUtf8Bytes(
+                                e.target.value,
+                                MEMORIAL_NOTE_MAX_BYTES_WITH_PARENT,
+                              ),
+                            }
                           : d,
                       )
                     }
@@ -2572,8 +2941,11 @@ export default function App() {
                 <p className="hint">{t('firstOfferDeathHint')}</p>
             ) : null}
             </div>
-            {altarHasDeathDate(dedicationSheet.altar) ||
-            !dedicationSheet.parentBurnTxid ? (
+            {flowerReofferOk(
+              dedicationSheet.altar,
+              dedicationSheet.parentBurnTxid,
+              dedicationSheet.specialId,
+            ) || !dedicationSheet.parentBurnTxid ? (
               <div className="altar-detail-footer">
                 <p className="hint eta">
                   {t('etaEstimated', { eta: etaLabel })}
@@ -2649,6 +3021,32 @@ export default function App() {
                       {t('btnAmendAltar')}
                     </button>
                   ) : null}
+                  {dedicationSheet.isCreator &&
+                  dedicationSheet.parentBurnTxid &&
+                  !altarIsEvent(dedicationSheet.altar) &&
+                  !specialHidesAltarSectionLabel(
+                    specialForBurn(
+                      dedicationSheet.parentBurnTxid,
+                      dedicationSheet.specialId,
+                    ),
+                  ) ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={!canOffer}
+                      onClick={() =>
+                        setAmendSheet({
+                          parentBurnTxid: dedicationSheet.parentBurnTxid,
+                          altar: dedicationSheet.altar,
+                          kind: 'list',
+                        })
+                      }
+                    >
+                      {dedicationSheet.altar.listed === true
+                        ? t('btnUnlistAltar')
+                        : t('btnListAltar')}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : dedicationSheet.isCreator &&
@@ -2686,16 +3084,40 @@ export default function App() {
                   >
                     {t('btnAmendAltar')}
                   </button>
+                  {!altarIsEvent(dedicationSheet.altar) ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={!canOffer}
+                      onClick={() =>
+                        setAmendSheet({
+                          parentBurnTxid: dedicationSheet.parentBurnTxid,
+                          altar: dedicationSheet.altar,
+                          kind: 'list',
+                        })
+                      }
+                    >
+                      {dedicationSheet.altar.listed === true
+                        ? t('btnUnlistAltar')
+                        : t('btnListAltar')}
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
           </div>
-        </div>
+        </OfferModal>
       ) : null}
 
       {amendSheet && !busy ? (
         <AltarSetupModal
-          variant={amendSheet.kind === 'death' ? 'death' : 'relationship'}
+          variant={
+            amendSheet.kind === 'death'
+              ? 'death'
+              : amendSheet.kind === 'list'
+                ? 'list'
+                : 'relationship'
+          }
           initial={amendSheet.altar}
           etaLabel={etaLabel}
           offerDisabled={!canOffer || shareLookingUp}
@@ -2729,8 +3151,24 @@ export default function App() {
                   deathDate: fields.deathDate,
                   deathPlace: fields.deathPlace,
                   funeralPlace: fields.funeralPlace,
+                  dateCalendar: fields.dateCalendar,
                 },
                 amend: 'death',
+                relatedOptions: sessionRelatedOptions,
+              });
+              return;
+            }
+            if (kind === 'list') {
+              void onOffer({
+                parentBurnTxid,
+                displayNote:
+                  formatAltarPersonName(amendSheet.altar, locale) ||
+                  t('offeringFallback'),
+                altar: {
+                  ...amendSheet.altar,
+                  listed: fields.listed === true,
+                },
+                amend: 'list',
                 relatedOptions: sessionRelatedOptions,
               });
               return;
@@ -2767,7 +3205,7 @@ export default function App() {
       ) : null}
 
       {historyGroup ? (
-        <div
+        <OfferModal
           className="offer-modal"
           role="dialog"
           aria-modal="true"
@@ -2835,11 +3273,11 @@ export default function App() {
               })}
             </ul>
           </div>
-        </div>
+        </OfferModal>
       ) : null}
 
       {busy && session?.reoffer ? (
-        <div
+        <OfferModal
           className="offer-modal offer-modal--fill"
           role="dialog"
           aria-modal="true"
@@ -2900,6 +3338,7 @@ export default function App() {
                         <AltarDetails
                           altar={session.altar}
                           specialKind={sp?.kind ?? null}
+                          hideNote={Boolean(session.parentBurnTxid)}
                           relatedAltarOptions={
                             session.relatedOptions ?? relatedAltarOptions
                           }
@@ -2932,6 +3371,10 @@ export default function App() {
                 </p>
               </div>
               <p className="hint">{t('hintKeepScreen')}</p>
+              <OfferPushOptIn
+                installId={installId}
+                altars={remindAltarsFromOffers(offers, locale, hiddenRecent)}
+              />
               {cancelLoseConfirm ? (
                 <div className="offer-cancel-confirm" role="alertdialog">
                   <p>
@@ -2962,11 +3405,11 @@ export default function App() {
               {msg ? <div className={`msg ${msg.kind}`}>{msg.text}</div> : null}
             </div>
           </div>
-        </div>
+        </OfferModal>
       ) : null}
 
       {busy && session && !session.reoffer ? (
-        <div
+        <OfferModal
           className="offer-modal offer-modal--fill"
           role="dialog"
           aria-modal="true"
@@ -3046,6 +3489,7 @@ export default function App() {
                         <AltarDetails
                           altar={session.altar}
                           specialKind={sp?.kind ?? null}
+                          hideNote={Boolean(session.parentBurnTxid)}
                           relatedAltarOptions={
                             session.relatedOptions ?? relatedAltarOptions
                           }
@@ -3071,6 +3515,10 @@ export default function App() {
                 </p>
               </div>
               <p className="hint">{t('hintKeepScreen')}</p>
+              <OfferPushOptIn
+                installId={installId}
+                altars={remindAltarsFromOffers(offers, locale, hiddenRecent)}
+              />
               {cancelLoseConfirm ? (
                 <div className="offer-cancel-confirm" role="alertdialog">
                   <p>
@@ -3101,7 +3549,7 @@ export default function App() {
               {msg ? <div className={`msg ${msg.kind}`}>{msg.text}</div> : null}
             </div>
           </div>
-        </div>
+        </OfferModal>
       ) : null}
 
       <footer className="footer">
